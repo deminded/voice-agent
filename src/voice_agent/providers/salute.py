@@ -10,6 +10,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass
+from typing import AsyncIterator
 
 import httpx
 
@@ -89,6 +90,40 @@ class SaluteTTS:
             )
             r.raise_for_status()
         return r.content
+
+    async def synthesize_stream(
+        self,
+        text: str,
+        *,
+        voice: str = "Tur_24000",
+        format: str = "pcm16",
+        ssml: bool = False,
+        chunk_size: int = 4096,
+    ) -> AsyncIterator[bytes]:
+        """Yield raw PCM bytes as they arrive from Salute's HTTP response.
+
+        Uses httpx streaming so the caller can push each chunk to LiveKit's
+        AudioEmitter immediately — latency drops to TTFB instead of full
+        synthesis time.  Errors (4xx/5xx) propagate via raise_for_status
+        before iteration begins.
+        """
+        token = await self._auth.get_token()
+        content_type = "application/ssml" if ssml else "application/text"
+        async with httpx.AsyncClient(verify=False, timeout=30.0) as c:
+            async with c.stream(
+                "POST",
+                f"{settings.salute_api_url}/text:synthesize",
+                params={"format": format, "voice": voice},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": content_type,
+                },
+                content=text.encode("utf-8"),
+            ) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                    if chunk:
+                        yield chunk
 
 
 # Сопоставление наших имён формата с MIME-типами Salute speech:recognize.

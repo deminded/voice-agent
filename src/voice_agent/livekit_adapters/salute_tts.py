@@ -1,9 +1,9 @@
 """LiveKit TTS adapter that wraps our SaluteTTS provider.
 
 We request pcm16 from Salute (raw 16-bit LE PCM at 24kHz, mono for Tur_24000)
-and push it as a single segment into LiveKit's AudioEmitter. Streaming
-synthesis (chunked output as Claude generates) is a follow-up — for first
-working live diалог it's fine to deliver the whole utterance at once.
+and stream the response body into LiveKit's AudioEmitter chunk-by-chunk, so
+playback starts as soon as the first bytes arrive (TTFB latency, not full
+synthesis latency).
 """
 from __future__ import annotations
 
@@ -43,10 +43,8 @@ class SaluteTTSAdapter(tts.TTS):
 
 class _SaluteChunkedStream(tts.ChunkedStream):
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
-        # Request raw PCM directly so we don't decode opus on the way back.
         salute: _SaluteTTS = self._tts._inner  # type: ignore[attr-defined]
         voice: str = self._tts._voice  # type: ignore[attr-defined]
-        audio = await salute.synthesize(self._input_text, voice=voice, format="pcm16")
 
         output_emitter.initialize(
             request_id=str(uuid.uuid4()),
@@ -54,5 +52,7 @@ class _SaluteChunkedStream(tts.ChunkedStream):
             num_channels=1,
             mime_type="audio/pcm",
         )
-        output_emitter.push(audio)
+        # Push each HTTP response chunk immediately so playback starts at TTFB.
+        async for chunk in salute.synthesize_stream(self._input_text, voice=voice, format="pcm16"):
+            output_emitter.push(chunk)
         output_emitter.flush()
