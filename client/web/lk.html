@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>voice-agent · live</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0f1115">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <style>
   :root { color-scheme: light dark; --bg:#0f1115; --fg:#e6e8ec; --muted:#8a8f99; --accent:#6ea8ff; --warn:#ff9e6e; --you:#b1d4ff; --them:#d8b6ff; }
   * { box-sizing:border-box; }
@@ -254,6 +257,12 @@ connectBtn.addEventListener('click', () => {
   if (!connected) connect();
   else disconnect();
 });
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () =>
+    navigator.serviceWorker.register('/sw.js').catch(err => console.warn('sw register failed', err))
+  );
+}
 </script>
 </body>
 </html>

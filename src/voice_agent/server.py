@@ -97,6 +97,27 @@ async def lk_index() -> FileResponse:
     return FileResponse(WEB_DIR / "lk.html")
 
 
+@app.get("/manifest.json")
+async def manifest() -> FileResponse:
+    return FileResponse(WEB_DIR / "manifest.json", media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+async def service_worker() -> FileResponse:
+    # Must be served from root scope so it can intercept /lk requests
+    return FileResponse(WEB_DIR / "sw.js", media_type="application/javascript")
+
+
+@app.get("/icon-192.png")
+async def icon_192() -> FileResponse:
+    return FileResponse(WEB_DIR / "icon-192.png", media_type="image/png")
+
+
+@app.get("/icon-512.png")
+async def icon_512() -> FileResponse:
+    return FileResponse(WEB_DIR / "icon-512.png", media_type="image/png")
+
+
 @app.get("/livekit/token")
 async def livekit_token(identity: str = "guest") -> dict:
     """Mint a short-lived JWT for the browser to join a LiveKit room.
