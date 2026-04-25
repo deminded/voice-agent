@@ -21,10 +21,11 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from voice_agent.conversation import Conversation
-from voice_agent.providers.echo import EchoLLM
+from voice_agent.providers.anthropic_llm import ClaudeLLM
 from voice_agent.providers.salute import SaluteAuth, SaluteSTT, SaluteTTS
 
 log = logging.getLogger("voice-agent")
@@ -33,11 +34,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    load_dotenv()  # picks up voice-agent/.env when started from project root
     auth = SaluteAuth()
     app.state.stt = SaluteSTT(auth)
     app.state.tts = SaluteTTS(auth)
-    app.state.llm = EchoLLM()
-    log.info("voice-agent ready: SaluteSpeech + EchoLLM")
+    # llm_factory: one Claude per connection so history stays per-client.
+    # Tests override with `app.state.llm_factory = lambda: MockLLM()`.
+    app.state.llm_factory = lambda: ClaudeLLM()
+    log.info("voice-agent ready: SaluteSpeech + Claude")
     yield
 
 
@@ -52,7 +56,8 @@ async def health() -> dict:
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
-    convo = Conversation(ws.app.state.stt, ws.app.state.llm, ws.app.state.tts)
+    llm = ws.app.state.llm_factory()
+    convo = Conversation(ws.app.state.stt, llm, ws.app.state.tts)
     log.info("client connected")
     try:
         while True:
