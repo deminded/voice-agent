@@ -1,0 +1,16 @@
+[Unit]
+Description=Voice agent LiveKit worker (Claude STT/LLM/TTS pipeline)
+After=network.target voice-agent-server.service
+
+[Service]
+User=claude-user
+WorkingDirectory=/home/claude-user/voice-agent
+ExecStart=/home/claude-user/voice-agent/.venv/bin/python -m voice_agent.livekit_agent start
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/claude-user/voice-agent/.env
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

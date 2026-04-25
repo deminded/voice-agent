@@ -1,0 +1,16 @@
+[Unit]
+Description=Voice agent FastAPI server (LiveKit token + WS client)
+After=network.target
+
+[Service]
+User=claude-user
+WorkingDirectory=/home/claude-user/voice-agent
+ExecStart=/home/claude-user/voice-agent/.venv/bin/python -m uvicorn voice_agent.server:app --host 127.0.0.1 --port 8765
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/claude-user/voice-agent/.env
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
