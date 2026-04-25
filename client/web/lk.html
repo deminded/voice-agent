@@ -42,6 +42,7 @@
 
 <footer>
   <span id="hint" class="hint">click connect, then just talk — the agent handles turns</span>
+  <button id="muteBtn" class="action" disabled style="background:#2a2d35;color:var(--muted);">mic on</button>
   <button id="connectBtn" class="action">connect</button>
 </footer>
 
@@ -137,6 +138,8 @@ async function connect() {
   connectBtn.classList.add('live');
   connectBtn.textContent = 'disconnect';
   connectBtn.disabled = false;
+  muteBtn.disabled = false;
+  setMuteUI(false);
 }
 
 async function disconnect() {
@@ -144,7 +147,40 @@ async function disconnect() {
     await room.disconnect();
     room = null;
   }
+  muteBtn.disabled = true;
+  setMuteUI(false);
 }
+
+const muteBtn = document.getElementById('muteBtn');
+
+function setMuteUI(muted) {
+  if (muted) {
+    muteBtn.textContent = 'mic muted';
+    muteBtn.style.background = '#ff6e6e';
+    muteBtn.style.color = '#000';
+  } else {
+    muteBtn.textContent = 'mic on';
+    muteBtn.style.background = '#2a2d35';
+    muteBtn.style.color = 'var(--muted)';
+  }
+}
+
+muteBtn.addEventListener('click', async () => {
+  if (!room || !room.localParticipant) return;
+  const isMuted = !room.localParticipant.isMicrophoneEnabled;
+  await room.localParticipant.setMicrophoneEnabled(isMuted);  // toggle
+  setMuteUI(!isMuted);
+});
+
+// Spacebar as walkie-talkie shortcut: hold to unmute, release to mute.
+// Useful while the agent is talking — release space to listen, hold to reply.
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' && !e.repeat && room?.localParticipant && document.activeElement?.tagName !== 'BUTTON') {
+    e.preventDefault();
+    room.localParticipant.setMicrophoneEnabled(true);
+    setMuteUI(false);
+  }
+});
 
 connectBtn.addEventListener('click', () => {
   if (!connected) connect();
