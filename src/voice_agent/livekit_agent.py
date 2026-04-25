@@ -26,6 +26,7 @@ from livekit.plugins import anthropic, silero
 from voice_agent.livekit_adapters.salute_stt import SaluteSTTAdapter
 from voice_agent.livekit_adapters.salute_tts import SaluteTTSAdapter
 from voice_agent.memory_loader import load_identity_prompt
+from voice_agent.session_recorder import SessionRecorder
 
 
 log = logging.getLogger("voice-agent.livekit")
@@ -56,9 +57,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         llm=anthropic.LLM(model="claude-sonnet-4-6"),
         tts=SaluteTTSAdapter(voice="Tur_24000"),
     )
+    recorder = SessionRecorder(room_name=ctx.room.name if ctx.room else None)
+    recorder.attach(session)
+    ctx.add_shutdown_callback(lambda: recorder.finalize(reason="job_shutdown"))
+
     await session.start(room=ctx.room, agent=_Assistant())
     await ctx.connect()
-    log.info("agent connected, session live")
+    log.info("agent connected, session live (recording to %s)", recorder.session_dir)
 
 
 if __name__ == "__main__":
