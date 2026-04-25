@@ -24,8 +24,10 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from voice_agent.config import settings
 from voice_agent.conversation import Conversation
 from voice_agent.providers.anthropic_llm import ClaudeLLM
+from voice_agent.providers.elevenlabs import ElevenLabsTTS
 from voice_agent.providers.salute import SaluteAuth, SaluteSTT, SaluteTTS
 
 log = logging.getLogger("voice-agent")
@@ -37,11 +39,16 @@ async def lifespan(app: FastAPI):
     load_dotenv()  # picks up voice-agent/.env when started from project root
     auth = SaluteAuth()
     app.state.stt = SaluteSTT(auth)
-    app.state.tts = SaluteTTS(auth)
+    if settings.tts_provider == "elevenlabs":
+        app.state.tts = ElevenLabsTTS()
+        tts_label = f"ElevenLabs(voice={settings.elevenlabs_voice_id}, proxy={settings.elevenlabs_proxy or 'direct'})"
+    else:
+        app.state.tts = SaluteTTS(auth)
+        tts_label = "SaluteSpeech"
     # llm_factory: one Claude per connection so history stays per-client.
     # Tests override with `app.state.llm_factory = lambda: MockLLM()`.
     app.state.llm_factory = lambda: ClaudeLLM()
-    log.info("voice-agent ready: SaluteSpeech + Claude")
+    log.info("voice-agent ready: STT=SaluteSpeech, TTS=%s, LLM=Claude", tts_label)
     yield
 
 

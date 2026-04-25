@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     salute_api_url: str = "https://smartspeech.sber.ru/rest/v1"
 
     elevenlabs_api_key: str | None = None
+    elevenlabs_voice_id: str = "LQvKMTkxp4E8zug4uabW"  # Voice Design preview 3, saved
+    elevenlabs_proxy: str | None = None  # e.g. socks5://127.0.0.1:1080
+
+    # which TTS to instantiate at server startup. "salute" or "elevenlabs".
+    tts_provider: str = "salute"
 
 
 settings = Settings()

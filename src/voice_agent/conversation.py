@@ -32,7 +32,7 @@ class Conversation:
         llm: LLMProvider,
         tts: TTSProvider,
         *,
-        voice: str = "Tur_24000",
+        voice: str | None = None,  # None lets the TTS provider use its own default
         out_format: str = "opus",
     ) -> None:
         self._stt = stt
@@ -48,9 +48,10 @@ class Conversation:
     async def turn(self, audio: bytes, *, in_format: str = "opus") -> TurnResult:
         transcript = await self._stt.transcribe(audio, format=in_format)
         response_text = await self._llm.reply(transcript)
-        response_audio = await self._tts.synthesize(
-            response_text, voice=self._voice, format=self._out_format
-        )
+        kwargs = {"format": self._out_format}
+        if self._voice is not None:
+            kwargs["voice"] = self._voice
+        response_audio = await self._tts.synthesize(response_text, **kwargs)
         return TurnResult(
             transcript=transcript,
             response_text=response_text,
