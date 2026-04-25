@@ -23,7 +23,9 @@ log = logging.getLogger("voice-agent.recorder")
 
 SESSIONS_ROOT = Path(__file__).resolve().parents[2] / "sessions"
 REFLECTIONS_DIR = Path("/opt/workspace/vault/Reflections")
-SYNTHESIS_MODEL = "claude-sonnet-4-6"
+# Opus for reflections — глубина важнее скорости (как у человека: в моменте
+# мыслим быстрее и поверхностнее, потом перерабатываем опыт глубже).
+SYNTHESIS_MODEL = os.environ.get("VOICE_SYNTHESIS_MODEL", "claude-opus-4-7")
 MIN_ITEMS_FOR_SYNTHESIS = 4  # 2 user turns + 2 agent turns at minimum
 
 SYNTHESIS_SYSTEM = """\
