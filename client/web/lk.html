@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>voice-agent · live</title>
+<style>
+  :root { color-scheme: light dark; --bg:#0f1115; --fg:#e6e8ec; --muted:#8a8f99; --accent:#6ea8ff; --warn:#ff9e6e; --you:#b1d4ff; --them:#d8b6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.45 -apple-system,"Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--fg); display:flex; flex-direction:column; height:100vh; }
+  header { padding:12px 16px; border-bottom:1px solid #222; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:14px; margin:0; font-weight:600; letter-spacing:0.02em; color:var(--muted); }
+  .status { font-size:12px; color:var(--muted); }
+  .status.live { color:#6eff8e; }
+  .status.err { color:var(--warn); }
+  .indicator { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); }
+  .dot.on { background:#6eff8e; box-shadow:0 0 8px #6eff8e; }
+  main { flex:1; padding:16px; overflow-y:auto; display:flex; flex-direction:column; gap:12px; }
+  .turn { padding:10px 14px; border-radius:10px; max-width:85%; }
+  .you { background:rgba(177,212,255,0.08); color:var(--you); align-self:flex-end; }
+  .them { background:rgba(216,182,255,0.08); color:var(--them); align-self:flex-start; }
+  .label { font-size:11px; color:var(--muted); margin-bottom:4px; text-transform:uppercase; letter-spacing:0.05em; }
+  .turn.partial { opacity:0.6; }
+  footer { padding:16px; border-top:1px solid #222; display:flex; gap:12px; align-items:center; justify-content:center; }
+  button.action { appearance:none; border:0; background:var(--accent); color:#000; padding:10px 24px; font:inherit; font-size:14px; font-weight:600; border-radius:8px; cursor:pointer; }
+  button.action:disabled { background:#2a2d35; color:var(--muted); cursor:default; }
+  button.action.live { background:#ff6e6e; }
+  .hint { font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>voice-agent · live</h1>
+  <span id="status" class="status">disconnected</span>
+  <div class="indicator"><span id="micDot" class="dot"></span> mic</div>
+  <div class="indicator"><span id="agentDot" class="dot"></span> agent</div>
+</header>
+
+<main id="log"></main>
+
+<footer>
+  <span id="hint" class="hint">click connect, then just talk — the agent handles turns</span>
+  <button id="connectBtn" class="action">connect</button>
+</footer>
+
+<script type="module">
+import { Room, RoomEvent, Track, RemoteTrack } from "https://esm.sh/livekit-client@2.13.6";
+
+const status = document.getElementById('status');
+const log = document.getElementById('log');
+const micDot = document.getElementById('micDot');
+const agentDot = document.getElementById('agentDot');
+const connectBtn = document.getElementById('connectBtn');
+const hint = document.getElementById('hint');
+
+let room = null;
+let connected = false;
+
+// transcript bubbles, keyed by id; partial -> final replaces in place
+const bubbles = new Map();
+
+function setStatus(text, cls = '') {
+  status.textContent = text;
+  status.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+function bubble(id, who, text, partial) {
+  let b = bubbles.get(id);
+  if (!b) {
+    b = document.createElement('div');
+    b.className = 'turn ' + who + (partial ? ' partial' : '');
+    b.innerHTML = `<div class="label">${who === 'you' ? 'you' : 'claude'}</div><div class="text"></div>`;
+    bubbles.set(id, b);
+    log.appendChild(b);
+  }
+  b.classList.toggle('partial', !!partial);
+  b.querySelector('.text').textContent = text;
+  log.scrollTop = log.scrollHeight;
+}
+
+async function connect() {
+  connectBtn.disabled = true;
+  setStatus('fetching token…');
+
+  const r = await fetch(`/livekit/token?identity=guest-${Math.random().toString(36).slice(2,8)}`);
+  const j = await r.json();
+  if (j.error) { setStatus('token error: ' + j.error, 'err'); connectBtn.disabled = false; return; }
+
+  room = new Room({
+    adaptiveStream: true,
+    dynacast: true,
+  });
+
+  room
+    .on(RoomEvent.Connected, () => {
+      setStatus('connected', 'live');
+      hint.textContent = 'just speak — the agent will hear you and reply';
+    })
+    .on(RoomEvent.Disconnected, () => {
+      setStatus('disconnected', 'err');
+      micDot.classList.remove('on');
+      agentDot.classList.remove('on');
+      connectBtn.classList.remove('live');
+      connectBtn.textContent = 'connect';
+      connectBtn.disabled = false;
+      connected = false;
+    })
+    .on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+      if (track.kind === Track.Kind.Audio) {
+        const el = track.attach();
+        el.autoplay = true;
+        document.body.appendChild(el);
+        agentDot.classList.add('on');
+      }
+    })
+    .on(RoomEvent.ActiveSpeakersChanged, speakers => {
+      const localOn = speakers.some(s => s.isLocal);
+      const agentOn = speakers.some(s => !s.isLocal);
+      micDot.classList.toggle('on', localOn);
+      agentDot.classList.toggle('on', agentOn);
+    })
+    // Transcriptions: agent emits them via the SDK's TranscriptionReceived event.
+    .on(RoomEvent.TranscriptionReceived, (segments, participant) => {
+      const isLocal = participant && participant.isLocal;
+      for (const s of segments) {
+        const who = isLocal ? 'you' : 'them';
+        bubble(s.id, who, s.text, !s.final);
+      }
+    });
+
+  await room.connect(j.url, j.token);
+  await room.localParticipant.setMicrophoneEnabled(true);
+
+  connected = true;
+  connectBtn.classList.add('live');
+  connectBtn.textContent = 'disconnect';
+  connectBtn.disabled = false;
+}
+
+async function disconnect() {
+  if (room) {
+    await room.disconnect();
+    room = null;
+  }
+}
+
+connectBtn.addEventListener('click', () => {
+  if (!connected) connect();
+  else disconnect();
+});
+</script>
+</body>
+</html>

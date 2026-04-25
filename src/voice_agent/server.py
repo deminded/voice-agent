@@ -91,6 +91,37 @@ async def index() -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
 
 
+@app.get("/lk")
+async def lk_index() -> FileResponse:
+    """LiveKit-based client (real live dialog with VAD, turn-taking, interruptions)."""
+    return FileResponse(WEB_DIR / "lk.html")
+
+
+@app.get("/livekit/token")
+async def livekit_token(identity: str = "guest") -> dict:
+    """Mint a short-lived JWT for the browser to join a LiveKit room.
+
+    Each visit gets a per-identity room so multiple testers don't collide.
+    The agent worker auto-dispatches into any room it sees.
+    """
+    from livekit import api as lk_api
+
+    api_key = os.environ.get("LIVEKIT_API_KEY")
+    api_secret = os.environ.get("LIVEKIT_API_SECRET")
+    url = os.environ.get("LIVEKIT_URL")
+    if not (api_key and api_secret and url):
+        return {"error": "LIVEKIT_* env vars missing"}
+
+    room_name = f"voice-agent-{identity}"
+    token = (
+        lk_api.AccessToken(api_key, api_secret)
+        .with_identity(identity)
+        .with_name(identity)
+        .with_grants(lk_api.VideoGrants(room_join=True, room=room_name, can_publish=True, can_subscribe=True))
+    )
+    return {"url": url, "token": token.to_jwt(), "room": room_name}
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
