@@ -1,31 +1,51 @@
-"""LiveKit STT adapter that wraps our SaluteSTT provider.
+"""LiveKit STT adapter — SaluteSpeech streaming via gRPC.
 
-LiveKit gives us an AudioBuffer (one or more rtc.AudioFrame instances at
-some negotiated sample rate, typically 48kHz for WebRTC). We merge it into
-a single PCM16 chunk and ship to Salute's `speech:recognize`. The agent
-runtime owns the VAD, segmentation, and turn detection — we don't.
+Non-streaming path (_recognize_impl) remains for backwards compat.
+Streaming path (stream()) opens a gRPC bidirectional stream to
+smartspeech.sber.ru:443, feeds audio frames as they arrive, and emits
+INTERIM_TRANSCRIPT / FINAL_TRANSCRIPT events as Salute responds.
 
-This is non-streaming MVP: every utterance is one full Salute call. Salute
-also has a websocket streaming endpoint we can swap in later for partial
-transcripts and lower latency.
+Protocol: gRPC over TLS (grpc.aio).  Auth: Bearer token in per-call
+metadata, refreshed via SaluteAuth.get_token() before each stream.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
+from typing import AsyncGenerator
 
+import grpc
+import grpc.aio
+
+from livekit import rtc
 from livekit.agents import APIConnectOptions, stt, utils
 from livekit.agents.types import NOT_GIVEN, NotGivenOr
 
-from voice_agent.providers.salute import SaluteSTT as _SaluteSTT
+from voice_agent.grpc_stubs import recognition_pb2, recognition_pb2_grpc
+from voice_agent.providers.salute import SaluteAuth, SaluteSTT as _SaluteSTT
+
+# Salute gRPC endpoint — TLS on 443, same host as REST.
+_GRPC_HOST = "smartspeech.sber.ru:443"
+
+# Send 320 ms chunks at 16 kHz mono PCM16 = 10 240 bytes per chunk.
+# Small enough for low latency, large enough to not spam gRPC.
+_CHUNK_BYTES = 10_240
 
 
 class SaluteSTTAdapter(stt.STT):
     def __init__(self, *, language: str = "ru-RU") -> None:
         super().__init__(
-            capabilities=stt.STTCapabilities(streaming=False, interim_results=False),
+            # streaming=True tells LiveKit to call stream() instead of recognize().
+            capabilities=stt.STTCapabilities(streaming=True, interim_results=True),
         )
         self._inner = _SaluteSTT()
+        self._auth = SaluteAuth()
         self._language = language
+
+    # ------------------------------------------------------------------
+    # Non-streaming fallback — kept intact, used when caller picks
+    # recognize() explicitly or capabilities.streaming gets set False.
+    # ------------------------------------------------------------------
 
     async def _recognize_impl(
         self,
@@ -34,35 +54,144 @@ class SaluteSTTAdapter(stt.STT):
         language: NotGivenOr[str] = NOT_GIVEN,
         conn_options: APIConnectOptions,
     ) -> stt.SpeechEvent:
-        # merge_frames concatenates rtc.AudioFrame[] into one frame; .data is
-        # raw PCM16 little-endian at the frame's sample_rate.
         merged = utils.merge_frames(buffer)
         pcm_bytes = bytes(merged.data)
         sample_rate = merged.sample_rate
 
-        if sample_rate == 16000:
-            # Salute's pcm16 MIME pin is rate=16000 — feed the bytes as-is.
-            text = await self._inner.transcribe(pcm_bytes, format="pcm16", language=self._language)
-        else:
-            # Resample to 16k for Salute's PCM endpoint, or send as opus container.
-            # Simpler path: encode as wav16 (Salute accepts arbitrary sample rate
-            # in WAV header form). But our SaluteSTT MIME map doesn't list wav16,
-            # so we resample to 16k via livekit utils.
-            resampled = _resample_to_16k(pcm_bytes, sample_rate)
-            text = await self._inner.transcribe(resampled, format="pcm16", language=self._language)
+        if sample_rate != 16000:
+            pcm_bytes = _resample_to_16k(pcm_bytes, sample_rate)
 
         actual_lang = language if language is not NOT_GIVEN else self._language
+        text = await self._inner.transcribe(pcm_bytes, format="pcm16", language=actual_lang)
         return stt.SpeechEvent(
             type=stt.SpeechEventType.FINAL_TRANSCRIPT,
             request_id=str(uuid.uuid4()),
             alternatives=[stt.SpeechData(language=actual_lang, text=text)],
         )
 
+    # ------------------------------------------------------------------
+    # Streaming path
+    # ------------------------------------------------------------------
+
+    def stream(
+        self,
+        *,
+        language: NotGivenOr[str] = NOT_GIVEN,
+        conn_options: APIConnectOptions = APIConnectOptions(),
+    ) -> stt.RecognizeStream:
+        actual_lang = language if language is not NOT_GIVEN else self._language
+        return _SaluteRecognizeStream(
+            stt=self,
+            conn_options=conn_options,
+            language=actual_lang,
+            auth=self._auth,
+        )
+
+
+class _SaluteRecognizeStream(stt.RecognizeStream):
+    def __init__(
+        self,
+        *,
+        stt: SaluteSTTAdapter,
+        conn_options: APIConnectOptions,
+        language: str,
+        auth: SaluteAuth,
+    ) -> None:
+        # sample_rate=16000 tells RecognizeStream base to auto-resample input.
+        super().__init__(stt=stt, conn_options=conn_options, sample_rate=16000)
+        self._language = language
+        self._auth = auth
+
+    async def _run(self) -> None:
+        token = await self._auth.get_token()
+        req_id = str(uuid.uuid4())
+
+        ssl_creds = grpc.ssl_channel_credentials()
+        token_creds = grpc.access_token_call_credentials(token)
+        combined = grpc.composite_channel_credentials(ssl_creds, token_creds)
+
+        async with grpc.aio.secure_channel(_GRPC_HOST, combined) as channel:
+            stub = recognition_pb2_grpc.SmartSpeechStub(channel)
+            call = stub.Recognize(_audio_request_generator(self._input_ch, self._language))
+
+            started = False
+            async for resp in call:
+                if not started:
+                    # Emit START_OF_SPEECH on first response that has any text.
+                    if any(h.text for h in resp.results):
+                        self._event_ch.send_nowait(
+                            stt.SpeechEvent(
+                                type=stt.SpeechEventType.START_OF_SPEECH,
+                                request_id=req_id,
+                            )
+                        )
+                        started = True
+
+                if not resp.results:
+                    continue
+
+                text = resp.results[0].normalized_text or resp.results[0].text
+
+                if resp.eou:
+                    # Final result for this utterance.
+                    self._event_ch.send_nowait(
+                        stt.SpeechEvent(
+                            type=stt.SpeechEventType.FINAL_TRANSCRIPT,
+                            request_id=req_id,
+                            alternatives=[stt.SpeechData(language=self._language, text=text)],
+                        )
+                    )
+                else:
+                    # Partial / interim result — good for live display.
+                    self._event_ch.send_nowait(
+                        stt.SpeechEvent(
+                            type=stt.SpeechEventType.INTERIM_TRANSCRIPT,
+                            request_id=req_id,
+                            alternatives=[stt.SpeechData(language=self._language, text=text)],
+                        )
+                    )
+
+        # Signal end-of-speech after gRPC stream closes.
+        self._event_ch.send_nowait(
+            stt.SpeechEvent(
+                type=stt.SpeechEventType.END_OF_SPEECH,
+                request_id=req_id,
+            )
+        )
+
+
+async def _audio_request_generator(
+    input_ch: utils.aio.Chan,
+    language: str,
+) -> AsyncGenerator[recognition_pb2.RecognitionRequest, None]:
+    """Yield the options header then audio chunks from the input channel."""
+    yield recognition_pb2.RecognitionRequest(
+        options=recognition_pb2.RecognitionOptions(
+            audio_encoding=recognition_pb2.RecognitionOptions.PCM_S16LE,
+            sample_rate=16000,
+            language=language,
+            model="general",
+            enable_partial_results=True,
+            channels_count=1,
+        )
+    )
+
+    async for item in input_ch:
+        if isinstance(item, stt.RecognizeStream._FlushSentinel):
+            # Flush means end of this utterance — close the generator so gRPC
+            # sends half-close and Salute produces the final eou=True result.
+            return
+        # item is an rtc.AudioFrame; .data is a memoryview of PCM16 LE bytes.
+        pcm = bytes(item.data)
+        # Split into fixed-size chunks so gRPC message size stays small.
+        for i in range(0, len(pcm), _CHUNK_BYTES):
+            yield recognition_pb2.RecognitionRequest(audio_chunk=pcm[i : i + _CHUNK_BYTES])
+
 
 def _resample_to_16k(pcm_bytes: bytes, src_rate: int) -> bytes:
-    """Linear resampler; not perfect but Salute STT tolerates plenty of distortion.
+    """Linear resampler — adequate for STT, not for music.
 
-    Replace with audioop or numpy when we care about quality."""
+    audioop ships with CPython stdlib; no extra dep needed."""
     import audioop
     out, _ = audioop.ratecv(pcm_bytes, 2, 1, src_rate, 16000, None)
     return out
