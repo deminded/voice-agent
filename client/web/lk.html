@@ -27,6 +27,12 @@
   button.action:disabled { background:#2a2d35; color:var(--muted); cursor:default; }
   button.action.live { background:#ff6e6e; }
   .hint { font-size:12px; color:var(--muted); }
+  .mode-group { display:inline-flex; border:1px solid #2a2d35; border-radius:8px; overflow:hidden; }
+  button.mode { appearance:none; border:0; background:transparent; color:var(--muted); padding:8px 14px; font:inherit; font-size:13px; cursor:pointer; border-right:1px solid #2a2d35; }
+  button.mode:last-child { border-right:0; }
+  button.mode:disabled { cursor:default; opacity:0.5; }
+  button.mode.active { background:var(--accent); color:#000; font-weight:600; }
+  .dot.muted { background:#ff6e6e; box-shadow:0 0 8px #ff6e6e; }
 </style>
 </head>
 <body>
@@ -34,7 +40,7 @@
 <header>
   <h1>voice-agent · live</h1>
   <span id="status" class="status">disconnected</span>
-  <div class="indicator"><span id="micDot" class="dot"></span> mic</div>
+  <div class="indicator"><span id="micDot" class="dot"></span> <span id="micLabel">mic</span></div>
   <div class="indicator"><span id="agentDot" class="dot"></span> agent</div>
 </header>
 
@@ -42,7 +48,12 @@
 
 <footer>
   <span id="hint" class="hint">click connect, then just talk — the agent handles turns</span>
-  <button id="muteBtn" class="action" disabled style="background:#2a2d35;color:var(--muted);">mic on</button>
+  <div id="modeGroup" class="mode-group" style="display:none;">
+    <button id="modeAuto" class="mode" data-mode="auto" disabled>auto</button>
+    <button id="modeOn" class="mode" data-mode="always-on" disabled>always on</button>
+    <button id="modeOff" class="mode" data-mode="always-off" disabled>always off</button>
+  </div>
+  <button id="interjectBtn" class="action" disabled style="display:none;background:var(--warn);color:#000;">interject</button>
   <button id="connectBtn" class="action">connect</button>
 </footer>
 
@@ -52,12 +63,22 @@ import { Room, RoomEvent, Track, RemoteTrack } from "https://esm.sh/livekit-clie
 const status = document.getElementById('status');
 const log = document.getElementById('log');
 const micDot = document.getElementById('micDot');
+const micLabel = document.getElementById('micLabel');
 const agentDot = document.getElementById('agentDot');
 const connectBtn = document.getElementById('connectBtn');
 const hint = document.getElementById('hint');
+const modeGroup = document.getElementById('modeGroup');
+const modeBtns = modeGroup.querySelectorAll('button.mode');
+const interjectBtn = document.getElementById('interjectBtn');
 
 let room = null;
 let connected = false;
+
+const Mode = { AUTO: 'auto', ALWAYS_ON: 'always-on', ALWAYS_OFF: 'always-off' };
+let mode = Mode.ALWAYS_ON;       // headphones default; switch to AUTO for room
+let userOverride = false;        // true when user manually unmuted during agent speech
+let agentSpeaking = false;
+let agentOffTimer = null;        // debounce off-transitions to ride sentence pauses
 
 // transcript bubbles, keyed by id; partial -> final replaces in place
 const bubbles = new Map();
@@ -117,10 +138,9 @@ async function connect() {
       }
     })
     .on(RoomEvent.ActiveSpeakersChanged, speakers => {
-      const localOn = speakers.some(s => s.isLocal);
       const agentOn = speakers.some(s => !s.isLocal);
-      micDot.classList.toggle('on', localOn);
       agentDot.classList.toggle('on', agentOn);
+      handleAgentSpeaking(agentOn);
     })
     // Transcriptions: agent emits them via the SDK's TranscriptionReceived event.
     .on(RoomEvent.TranscriptionReceived, (segments, participant) => {
@@ -132,14 +152,14 @@ async function connect() {
     });
 
   await room.connect(j.url, j.token);
-  await room.localParticipant.setMicrophoneEnabled(true);
 
   connected = true;
   connectBtn.classList.add('live');
   connectBtn.textContent = 'disconnect';
   connectBtn.disabled = false;
-  muteBtn.disabled = false;
-  setMuteUI(false);
+  modeGroup.style.display = 'inline-flex';
+  modeBtns.forEach(b => b.disabled = false);
+  applyMode();
 }
 
 async function disconnect() {
@@ -147,39 +167,87 @@ async function disconnect() {
     await room.disconnect();
     room = null;
   }
-  muteBtn.disabled = true;
-  setMuteUI(false);
+  modeBtns.forEach(b => b.disabled = true);
+  interjectBtn.disabled = true;
+  interjectBtn.style.display = 'none';
+  agentSpeaking = false;
+  userOverride = false;
+  if (agentOffTimer) { clearTimeout(agentOffTimer); agentOffTimer = null; }
+  refreshUI();
 }
 
-const muteBtn = document.getElementById('muteBtn');
-
-function setMuteUI(muted) {
-  if (muted) {
-    muteBtn.textContent = 'mic muted';
-    muteBtn.style.background = '#ff6e6e';
-    muteBtn.style.color = '#000';
-  } else {
-    muteBtn.textContent = 'mic on';
-    muteBtn.style.background = '#2a2d35';
-    muteBtn.style.color = 'var(--muted)';
+function handleAgentSpeaking(speaking) {
+  if (speaking) {
+    if (agentOffTimer) { clearTimeout(agentOffTimer); agentOffTimer = null; }
+    if (!agentSpeaking) {
+      agentSpeaking = true;
+      // override is "for one phrase" — new agent phrase cancels it
+      if (mode === Mode.AUTO) userOverride = false;
+      applyMode();
+    }
+  } else if (agentSpeaking && !agentOffTimer) {
+    // debounce: ride short pauses between sentences before unmuting
+    agentOffTimer = setTimeout(() => {
+      agentOffTimer = null;
+      agentSpeaking = false;
+      applyMode();
+    }, 600);
   }
 }
 
-muteBtn.addEventListener('click', async () => {
-  if (!room || !room.localParticipant) return;
-  const isMuted = !room.localParticipant.isMicrophoneEnabled;
-  await room.localParticipant.setMicrophoneEnabled(isMuted);  // toggle
-  setMuteUI(!isMuted);
+function applyMode() {
+  if (!room?.localParticipant) { refreshUI(); return; }
+  let micOn;
+  if (mode === Mode.ALWAYS_ON) micOn = true;
+  else if (mode === Mode.ALWAYS_OFF) micOn = false;
+  else micOn = userOverride || !agentSpeaking;
+  // setMicrophoneEnabled is idempotent; safe to call every time
+  room.localParticipant.setMicrophoneEnabled(micOn);
+  refreshUI();
+}
+
+function refreshUI() {
+  modeBtns.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  let micOn;
+  if (mode === Mode.ALWAYS_ON) micOn = true;
+  else if (mode === Mode.ALWAYS_OFF) micOn = false;
+  else micOn = userOverride || !agentSpeaking;
+  micDot.classList.toggle('on', micOn);
+  micDot.classList.toggle('muted', !micOn);
+  if (mode === Mode.AUTO) {
+    micLabel.textContent = userOverride ? 'mic · user-on' : (agentSpeaking ? 'mic · auto-off' : 'mic · auto-on');
+  } else {
+    micLabel.textContent = 'mic · ' + mode;
+  }
+  // interject button: visible only in AUTO mode while mic is muted
+  const showInterject = connected && mode === Mode.AUTO && agentSpeaking && !userOverride;
+  interjectBtn.style.display = showInterject ? 'inline-block' : 'none';
+  interjectBtn.disabled = !showInterject;
+}
+
+modeBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.disabled) return;
+    mode = btn.dataset.mode;
+    userOverride = false;
+    applyMode();
+  });
 });
 
-// Spacebar as walkie-talkie shortcut: hold to unmute, release to mute.
-// Useful while the agent is talking — release space to listen, hold to reply.
+interjectBtn.addEventListener('click', () => {
+  if (mode !== Mode.AUTO || !agentSpeaking) return;
+  userOverride = true;
+  applyMode();
+});
+
+// Spacebar shortcut in AUTO mode: works as override (same as interject button).
 window.addEventListener('keydown', e => {
-  if (e.code === 'Space' && !e.repeat && room?.localParticipant && document.activeElement?.tagName !== 'BUTTON') {
-    e.preventDefault();
-    room.localParticipant.setMicrophoneEnabled(true);
-    setMuteUI(false);
-  }
+  if (e.code !== 'Space' || e.repeat) return;
+  if (document.activeElement?.tagName === 'BUTTON' || document.activeElement?.tagName === 'INPUT') return;
+  if (!connected || mode !== Mode.AUTO || !agentSpeaking || userOverride) return;
+  e.preventDefault();
+  userOverride = true;
+  applyMode();
 });
 
 connectBtn.addEventListener('click', () => {
