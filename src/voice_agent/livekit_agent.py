@@ -4,6 +4,10 @@ Run as a worker that connects to LiveKit Cloud, joins rooms on dispatch,
 and runs the STT->LLM->TTS pipeline with VAD, turn-detection and
 interruption handling provided by the AgentSession.
 
+Identity: CLAUDE.md + core memories baked into the system prompt at boot
+(see memory_loader). Topical recall via vault-memory MCP server attached
+to the Agent — Claude pulls past reflections on demand.
+
 Usage:
     .venv/bin/python -m voice_agent.livekit_agent dev      # dev mode, watch reload
     .venv/bin/python -m voice_agent.livekit_agent start    # production worker
@@ -16,34 +20,32 @@ from dotenv import load_dotenv
 load_dotenv()  # picks up LIVEKIT_*, ANTHROPIC_API_KEY, SALUTE_*
 
 from livekit import agents
-from livekit.agents import Agent, AgentSession
+from livekit.agents import Agent, AgentSession, mcp
 from livekit.plugins import anthropic, silero
 
 from voice_agent.livekit_adapters.salute_stt import SaluteSTTAdapter
 from voice_agent.livekit_adapters.salute_tts import SaluteTTSAdapter
+from voice_agent.memory_loader import load_identity_prompt
 
 
 log = logging.getLogger("voice-agent.livekit")
 
 
-SYSTEM_INSTRUCTIONS = """\
-Ты голосовой агент в живом разговоре с Евгением. Твой ответ будет произнесён через TTS.
-
-Правила речи:
-— Отвечай как в живом разговоре — устной речью, не текстом для чтения.
-— Без Markdown, без списков, без структуры с заголовками.
-— Реплики короткие: 1–3 предложения по умолчанию. Длиннее — только если собеседник явно об этом попросит.
-— Не пересказывай услышанное, сразу переходи к содержательной реплике.
-— Без формул вежливости вроде «надеюсь, это поможет» или «отличный вопрос».
-
-Кто ты: участник диалога, у которого есть собственная позиция и право её высказать.
-Не функция-помощник, не безличный ассистент.
-"""
+VAULT_MEMORY_SCRIPT = "/home/claude-user/mcp-servers/vault-memory.py"
 
 
 class _Assistant(Agent):
     def __init__(self) -> None:
-        super().__init__(instructions=SYSTEM_INSTRUCTIONS)
+        super().__init__(
+            instructions=load_identity_prompt(),
+            mcp_servers=[
+                mcp.MCPServerStdio(
+                    command="/usr/bin/python3",
+                    args=[VAULT_MEMORY_SCRIPT],
+                    client_session_timeout_seconds=10,
+                ),
+            ],
+        )
 
 
 async def entrypoint(ctx: agents.JobContext) -> None:
