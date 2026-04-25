@@ -74,11 +74,13 @@ def test_websocket_round_trip_with_mocks() -> None:
     with TestClient(app) as client:
         # swap providers after lifespan ran
         app.state.stt = stt
+        app.state.tts_pool = {"mock": tts}
+        app.state.default_tts_name = "mock"
         app.state.tts = tts
         app.state.llm_factory = lambda: EchoLLM()
 
         with client.websocket_connect("/ws") as ws:
-            ws.send_text(json.dumps({"type": "audio_start", "format": "pcm16"}))
+            ws.send_text(json.dumps({"type": "audio_start", "format": "pcm16", "tts": "mock"}))
             ws.send_bytes(b"audio-payload")
             ws.send_text(json.dumps({"type": "audio_end"}))
 

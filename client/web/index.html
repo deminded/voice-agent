@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>voice-agent</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0f1115;
+    --fg: #e6e8ec;
+    --muted: #8a8f99;
+    --accent: #6ea8ff;
+    --warn: #ff9e6e;
+    --you: #b1d4ff;
+    --them: #d8b6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    font: 16px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--fg);
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    padding: 12px 16px; border-bottom: 1px solid #222;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: 0.02em; color: var(--muted); }
+  .status { font-size: 12px; color: var(--muted); }
+  .status.live { color: #6eff8e; }
+  .status.err { color: var(--warn); }
+  .toggle { display: flex; gap: 4px; background: #1a1d25; padding: 3px; border-radius: 8px; }
+  .toggle button {
+    appearance: none; border: 0; background: transparent; color: var(--muted);
+    padding: 6px 12px; font: inherit; font-size: 13px; border-radius: 6px;
+    cursor: pointer;
+  }
+  .toggle button.active { background: var(--accent); color: #000; }
+  main {
+    flex: 1; padding: 16px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .turn { padding: 10px 14px; border-radius: 10px; max-width: 85%; }
+  .you { background: rgba(177, 212, 255, 0.08); color: var(--you); align-self: flex-end; }
+  .them { background: rgba(216, 182, 255, 0.08); color: var(--them); align-self: flex-start; }
+  .you .label, .them .label { font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+  footer {
+    padding: 16px; border-top: 1px solid #222;
+    display: flex; gap: 12px; align-items: center; justify-content: center;
+  }
+  .ptt {
+    appearance: none; border: 0;
+    width: 84px; height: 84px; border-radius: 50%;
+    background: var(--accent); color: #000;
+    font-size: 28px; cursor: pointer; transition: transform 80ms;
+    box-shadow: 0 2px 16px rgba(110, 168, 255, 0.4);
+  }
+  .ptt:active, .ptt.recording { transform: scale(0.94); background: #ff6e6e; box-shadow: 0 2px 24px rgba(255, 110, 110, 0.5); }
+  .hint { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>voice-agent</h1>
+  <span id="status" class="status">connecting…</span>
+  <div class="toggle" id="ttsToggle"></div>
+</header>
+
+<main id="log"></main>
+
+<footer>
+  <span class="hint">hold to talk → release to send</span>
+  <button id="ptt" class="ptt" disabled>🎙</button>
+</footer>
+
+<script type="module">
+const TARGET_SR = 16000;
+
+const status = document.getElementById('status');
+const log = document.getElementById('log');
+const ptt = document.getElementById('ptt');
+const ttsToggle = document.getElementById('ttsToggle');
+
+let ws;
+let audioCtx;
+let micStream;
+let micNode;
+let workletNode;
+let recordedSamples = [];
+let recording = false;
+let pendingAudio = null;
+let pendingAudioFmt = 'opus';
+let selectedTts = null;
+
+function setStatus(text, cls = '') {
+  status.textContent = text;
+  status.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+function appendTurn(label, text, who) {
+  const div = document.createElement('div');
+  div.className = 'turn ' + who;
+  div.innerHTML = `<div class="label">${label}</div><div class="text"></div>`;
+  div.querySelector('.text').textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+function buildToggle(providers, defaultName) {
+  ttsToggle.innerHTML = '';
+  selectedTts = defaultName;
+  providers.forEach(name => {
+    const btn = document.createElement('button');
+    btn.textContent = name;
+    if (name === defaultName) btn.classList.add('active');
+    btn.onclick = () => {
+      selectedTts = name;
+      ttsToggle.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === btn));
+    };
+    ttsToggle.appendChild(btn);
+  });
+}
+
+async function init() {
+  // 1) load provider list
+  try {
+    const r = await fetch('/providers');
+    const j = await r.json();
+    buildToggle(j.tts, j.default);
+  } catch (e) {
+    setStatus('cannot reach /providers', 'err');
+    return;
+  }
+
+  // 2) open ws
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    setStatus('ready', 'live');
+    ptt.disabled = false;
+  };
+  ws.onclose = () => {
+    setStatus('disconnected', 'err');
+    ptt.disabled = true;
+  };
+  ws.onerror = e => {
+    console.error(e);
+    setStatus('ws error', 'err');
+  };
+  ws.onmessage = onWsMessage;
+}
+
+function onWsMessage(ev) {
+  if (typeof ev.data === 'string') {
+    const evt = JSON.parse(ev.data);
+    if (evt.type === 'transcript') {
+      appendTurn('you', evt.text || '(silence)', 'you');
+    } else if (evt.type === 'response_text') {
+      appendTurn(`claude · ${pendingAudioFmt}`, evt.text, 'them');
+    } else if (evt.type === 'audio_start') {
+      pendingAudioFmt = evt.tts || evt.format;
+      pendingAudio = [];
+    } else if (evt.type === 'audio_end') {
+      if (pendingAudio && pendingAudio.length) {
+        const blob = new Blob(pendingAudio, { type: 'audio/ogg; codecs=opus' });
+        const audio = new Audio(URL.createObjectURL(blob));
+        audio.play().catch(err => console.warn('autoplay blocked', err));
+      }
+      pendingAudio = null;
+      setStatus('ready', 'live');
+    } else if (evt.type === 'error') {
+      setStatus('error: ' + evt.message, 'err');
+      pendingAudio = null;
+    }
+  } else {
+    // binary chunk of reply audio
+    if (pendingAudio) pendingAudio.push(ev.data);
+  }
+}
+
+async function ensureAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SR });
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }});
+  micNode = audioCtx.createMediaStreamSource(micStream);
+
+  // Inline AudioWorklet — captures Float32 samples and posts them out.
+  const workletSrc = `
+    class Capture extends AudioWorkletProcessor {
+      process(inputs) {
+        const input = inputs[0];
+        if (input && input.length > 0 && input[0]) {
+          this.port.postMessage(input[0].slice(0));
+        }
+        return true;
+      }
+    }
+    registerProcessor('capture', Capture);
+  `;
+  const blob = new Blob([workletSrc], { type: 'application/javascript' });
+  await audioCtx.audioWorklet.addModule(URL.createObjectURL(blob));
+  workletNode = new AudioWorkletNode(audioCtx, 'capture');
+  workletNode.port.onmessage = e => {
+    if (recording) recordedSamples.push(e.data);
+  };
+  micNode.connect(workletNode);
+  // we don't connect workletNode to destination — we don't want to hear ourselves
+}
+
+function floatTo16BitPCM(chunks) {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Int16Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i++) {
+      const s = Math.max(-1, Math.min(1, c[i]));
+      out[offset++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+  }
+  return out.buffer;
+}
+
+async function startRecord() {
+  if (ws?.readyState !== 1) return;
+  await ensureAudio();
+  recordedSamples = [];
+  recording = true;
+  ptt.classList.add('recording');
+  setStatus('recording…');
+}
+
+function stopRecordAndSend() {
+  if (!recording) return;
+  recording = false;
+  ptt.classList.remove('recording');
+  if (recordedSamples.length === 0) {
+    setStatus('ready', 'live');
+    return;
+  }
+  const pcmBuffer = floatTo16BitPCM(recordedSamples);
+  recordedSamples = [];
+  setStatus(`sending ${(pcmBuffer.byteLength / 1024).toFixed(0)} KB · ${selectedTts}…`);
+  ws.send(JSON.stringify({ type: 'audio_start', format: 'pcm16', tts: selectedTts }));
+  ws.send(pcmBuffer);
+  ws.send(JSON.stringify({ type: 'audio_end' }));
+}
+
+// push-to-talk: hold mouse / touch / spacebar
+ptt.addEventListener('pointerdown', e => { e.preventDefault(); startRecord(); });
+['pointerup', 'pointerleave', 'pointercancel'].forEach(ev =>
+  ptt.addEventListener(ev, e => { e.preventDefault(); stopRecordAndSend(); })
+);
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' && !e.repeat && document.activeElement !== ptt) { e.preventDefault(); startRecord(); }
+});
+window.addEventListener('keyup', e => {
+  if (e.code === 'Space') { e.preventDefault(); stopRecordAndSend(); }
+});
+
+init();
+</script>
+</body>
+</html>

@@ -45,13 +45,20 @@ class Conversation:
     def out_format(self) -> str:
         return self._out_format
 
-    async def turn(self, audio: bytes, *, in_format: str = "opus") -> TurnResult:
+    async def turn(
+        self,
+        audio: bytes,
+        *,
+        in_format: str = "opus",
+        tts: TTSProvider | None = None,
+    ) -> TurnResult:
         transcript = await self._stt.transcribe(audio, format=in_format)
         response_text = await self._llm.reply(transcript)
         kwargs = {"format": self._out_format}
         if self._voice is not None:
             kwargs["voice"] = self._voice
-        response_audio = await self._tts.synthesize(response_text, **kwargs)
+        chosen_tts = tts or self._tts
+        response_audio = await chosen_tts.synthesize(response_text, **kwargs)
         return TurnResult(
             transcript=transcript,
             response_text=response_text,
