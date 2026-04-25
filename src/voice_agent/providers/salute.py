@@ -1,0 +1,91 @@
+"""SaluteSpeech (Sber) provider — TTS today, STT next.
+
+Auth: Basic key from `.env` -> oauth -> bearer access_token, refreshed
+30s before expiry. One client instance per process; thread-safe via
+asyncio.Lock around the refresh.
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+import uuid
+from dataclasses import dataclass
+
+import httpx
+
+from voice_agent.config import settings
+
+
+@dataclass
+class _Token:
+    value: str
+    expires_at: float  # unix seconds
+
+
+class SaluteAuth:
+    """OAuth bearer-token holder. Refreshes lazily."""
+
+    REFRESH_MARGIN_S = 30.0
+
+    def __init__(self, *, auth_key: str | None = None, scope: str | None = None) -> None:
+        self._auth_key = auth_key or settings.salute_auth_key
+        self._scope = scope or settings.salute_scope
+        self._token: _Token | None = None
+        self._lock = asyncio.Lock()
+
+    async def get_token(self) -> str:
+        async with self._lock:
+            now = time.time()
+            if self._token and self._token.expires_at - self.REFRESH_MARGIN_S > now:
+                return self._token.value
+            self._token = await self._fetch()
+            return self._token.value
+
+    async def _fetch(self) -> _Token:
+        async with httpx.AsyncClient(verify=False, timeout=10.0) as c:
+            r = await c.post(
+                settings.salute_oauth_url,
+                headers={
+                    "Authorization": f"Basic {self._auth_key}",
+                    "RqUID": str(uuid.uuid4()),
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                },
+                data={"scope": self._scope},
+            )
+            r.raise_for_status()
+            payload = r.json()
+        return _Token(
+            value=payload["access_token"],
+            expires_at=payload["expires_at"] / 1000.0,  # ms -> s
+        )
+
+
+class SaluteTTS:
+    """text -> audio bytes via SmartSpeech synth."""
+
+    def __init__(self, auth: SaluteAuth | None = None) -> None:
+        self._auth = auth or SaluteAuth()
+
+    async def synthesize(
+        self,
+        text: str,
+        *,
+        voice: str = "Tur_24000",
+        format: str = "opus",
+        ssml: bool = False,
+    ) -> bytes:
+        token = await self._auth.get_token()
+        content_type = "application/ssml" if ssml else "application/text"
+        async with httpx.AsyncClient(verify=False, timeout=30.0) as c:
+            r = await c.post(
+                f"{settings.salute_api_url}/text:synthesize",
+                params={"format": format, "voice": voice},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": content_type,
+                },
+                content=text.encode("utf-8"),
+            )
+            r.raise_for_status()
+        return r.content
