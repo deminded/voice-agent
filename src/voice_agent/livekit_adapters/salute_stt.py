@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
 from typing import AsyncGenerator
 
 import grpc
@@ -26,6 +27,11 @@ from voice_agent.providers.salute import SaluteAuth, SaluteSTT as _SaluteSTT
 
 # Salute gRPC endpoint — TLS on 443, same host as REST.
 _GRPC_HOST = "smartspeech.sber.ru:443"
+
+# Sber's TLS chain is signed by the Russian Trusted Root CA (Минцифры),
+# which isn't in the certifi bundle. We ship the root with the project
+# so grpc can verify the handshake without disabling TLS verification.
+_RUSSIAN_ROOT_CA_PATH = Path(__file__).resolve().parents[3] / "certs" / "russian_trusted_root_ca.pem"
 
 # Send 320 ms chunks at 16 kHz mono PCM16 = 10 240 bytes per chunk.
 # Small enough for low latency, large enough to not spam gRPC.
@@ -106,7 +112,8 @@ class _SaluteRecognizeStream(stt.RecognizeStream):
         token = await self._auth.get_token()
         req_id = str(uuid.uuid4())
 
-        ssl_creds = grpc.ssl_channel_credentials()
+        root_certs = _RUSSIAN_ROOT_CA_PATH.read_bytes()
+        ssl_creds = grpc.ssl_channel_credentials(root_certificates=root_certs)
         token_creds = grpc.access_token_call_credentials(token)
         combined = grpc.composite_channel_credentials(ssl_creds, token_creds)
 
