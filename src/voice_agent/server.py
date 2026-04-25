@@ -76,7 +76,15 @@ app = FastAPI(lifespan=lifespan)
 # convenient for local dev and tests, never the production default.
 ACCESS_TOKEN = os.environ.get("VOICE_AGENT_ACCESS_TOKEN", "").strip()
 ACCESS_COOKIE = "va_access"
-ACCESS_BYPASS_PATHS = {"/health"}  # external monitoring needs to hit this freely
+# Public surface: PWA install criteria need /lk and assets reachable without auth,
+# /health is for external monitoring. None of these expose anything operational —
+# all the endpoints that actually spend tokens (livekit/ws/providers) stay gated.
+ACCESS_BYPASS_PATHS = {
+    "/health",
+    "/", "/lk",
+    "/manifest.json", "/sw.js",
+    "/icon-192.png", "/icon-512.png",
+}
 
 
 def _check_token(request: Request) -> str | None:
@@ -90,13 +98,14 @@ def _check_token(request: Request) -> str | None:
 
 @app.middleware("http")
 async def access_token_middleware(request: Request, call_next):
-    if not ACCESS_TOKEN or request.url.path in ACCESS_BYPASS_PATHS:
+    if not ACCESS_TOKEN:
         return await call_next(request)
-    provided = _check_token(request)
-    if provided != ACCESS_TOKEN:
+    is_public = request.url.path in ACCESS_BYPASS_PATHS
+    if not is_public and _check_token(request) != ACCESS_TOKEN:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     response: Response = await call_next(request)
     # Promote query-param auth to a long-lived cookie so PWA visits stay logged in.
+    # Runs on public paths too — that's the moment the user lands via /lk?key=… .
     if request.query_params.get("key") == ACCESS_TOKEN and ACCESS_COOKIE not in request.cookies:
         # Set Secure only when the request was actually HTTPS — in production nginx
         # terminates TLS and forwards X-Forwarded-Proto, so we honour that.

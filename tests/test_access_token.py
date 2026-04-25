@@ -25,36 +25,48 @@ def test_health_bypasses_token(secret: str) -> None:
         assert r.status_code == 200
 
 
-def test_lk_blocked_without_token(secret: str) -> None:
+def test_lk_is_public(secret: str) -> None:
+    """PWA shell must be reachable without auth so Chrome validates start_url."""
     with TestClient(srv.app) as client:
         r = client.get("/lk")
+        assert r.status_code == 200
+
+
+def test_pwa_assets_are_public(secret: str) -> None:
+    with TestClient(srv.app) as client:
+        for path in ("/manifest.json", "/sw.js", "/icon-192.png"):
+            assert client.get(path).status_code == 200, path
+
+
+def test_protected_endpoint_blocked_without_token(secret: str) -> None:
+    with TestClient(srv.app) as client:
+        r = client.get("/providers")
         assert r.status_code == 401
 
 
-def test_lk_allowed_with_query_key(secret: str) -> None:
+def test_protected_endpoint_allowed_with_key(secret: str) -> None:
+    with TestClient(srv.app) as client:
+        r = client.get(f"/providers?key={secret}")
+        assert r.status_code == 200
+
+
+def test_lk_query_key_promotes_cookie(secret: str) -> None:
     with TestClient(srv.app) as client:
         r = client.get(f"/lk?key={secret}")
         assert r.status_code == 200
-        # cookie set so subsequent requests don't need ?key=
         assert "va_access" in r.cookies
 
 
-def test_subsequent_request_uses_cookie(secret: str) -> None:
+def test_cookie_unlocks_protected_endpoint(secret: str) -> None:
     with TestClient(srv.app) as client:
-        client.get(f"/lk?key={secret}")
-        r2 = client.get("/manifest.json")
-        assert r2.status_code == 200
-
-
-def test_lk_allowed_with_header(secret: str) -> None:
-    with TestClient(srv.app) as client:
-        r = client.get("/lk", headers={"X-Voice-Access-Token": secret})
+        client.get(f"/lk?key={secret}")  # sets cookie via public path
+        r = client.get("/providers")     # protected, but cookie is now sent
         assert r.status_code == 200
 
 
 def test_wrong_token_rejected(secret: str) -> None:
     with TestClient(srv.app) as client:
-        r = client.get("/lk?key=wrong")
+        r = client.get("/providers?key=wrong")
         assert r.status_code == 401
 
 
