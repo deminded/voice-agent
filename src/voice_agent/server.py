@@ -27,8 +27,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from voice_agent.config import settings
 from voice_agent.conversation import Conversation
@@ -70,6 +70,46 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+# Single shared access token. If empty (env unset), auth is disabled —
+# convenient for local dev and tests, never the production default.
+ACCESS_TOKEN = os.environ.get("VOICE_AGENT_ACCESS_TOKEN", "").strip()
+ACCESS_COOKIE = "va_access"
+ACCESS_BYPASS_PATHS = {"/health"}  # external monitoring needs to hit this freely
+
+
+def _check_token(request: Request) -> str | None:
+    """Return the provided token (from query/header/cookie), or None."""
+    return (
+        request.query_params.get("key")
+        or request.headers.get("X-Voice-Access-Token")
+        or request.cookies.get(ACCESS_COOKIE)
+    )
+
+
+@app.middleware("http")
+async def access_token_middleware(request: Request, call_next):
+    if not ACCESS_TOKEN or request.url.path in ACCESS_BYPASS_PATHS:
+        return await call_next(request)
+    provided = _check_token(request)
+    if provided != ACCESS_TOKEN:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    response: Response = await call_next(request)
+    # Promote query-param auth to a long-lived cookie so PWA visits stay logged in.
+    if request.query_params.get("key") == ACCESS_TOKEN and ACCESS_COOKIE not in request.cookies:
+        # Set Secure only when the request was actually HTTPS — in production nginx
+        # terminates TLS and forwards X-Forwarded-Proto, so we honour that.
+        is_secure = (
+            request.url.scheme == "https"
+            or request.headers.get("X-Forwarded-Proto") == "https"
+        )
+        response.set_cookie(
+            ACCESS_COOKIE, ACCESS_TOKEN,
+            httponly=True, secure=is_secure, samesite="lax",
+            max_age=60 * 60 * 24 * 365,  # 1 year
+        )
+    return response
 
 
 @app.get("/health")
@@ -145,6 +185,15 @@ async def livekit_token(identity: str = "guest") -> dict:
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
+    if ACCESS_TOKEN:
+        provided = (
+            ws.query_params.get("key")
+            or ws.cookies.get(ACCESS_COOKIE)
+            or ws.headers.get("X-Voice-Access-Token")
+        )
+        if provided != ACCESS_TOKEN:
+            await ws.close(code=4401)
+            return
     await ws.accept()
     llm = ws.app.state.llm_factory()
     convo = Conversation(ws.app.state.stt, llm, ws.app.state.tts)
