@@ -1,4 +1,4 @@
-"""SaluteSpeech (Sber) provider — TTS today, STT next.
+"""SaluteSpeech (Sber) provider — TTS + STT.
 
 Auth: Basic key from `.env` -> oauth -> bearer access_token, refreshed
 30s before expiry. One client instance per process; thread-safe via
@@ -89,3 +89,49 @@ class SaluteTTS:
             )
             r.raise_for_status()
         return r.content
+
+
+# Сопоставление наших имён формата с MIME-типами Salute speech:recognize.
+# OPUS они принимают как audio/ogg;codecs=opus, PCM 16-bit как audio/x-pcm.
+_SALUTE_MIME = {
+    "opus": "audio/ogg;codecs=opus",
+    "pcm16": "audio/x-pcm;bit=16;rate=16000",
+    "mp3": "audio/mp3",
+    "flac": "audio/x-flac",
+}
+
+
+class SaluteSTT:
+    """audio bytes -> transcript text via SmartSpeech speech:recognize.
+
+    Suitable for short utterances (one push-to-talk segment). For continuous
+    streaming Salute exposes a websocket endpoint — out of MVP scope.
+    """
+
+    def __init__(self, auth: SaluteAuth | None = None) -> None:
+        self._auth = auth or SaluteAuth()
+
+    async def transcribe(
+        self,
+        audio: bytes,
+        *,
+        format: str = "opus",
+        language: str = "ru-RU",
+    ) -> str:
+        token = await self._auth.get_token()
+        mime = _SALUTE_MIME[format]
+        async with httpx.AsyncClient(verify=False, timeout=60.0) as c:
+            r = await c.post(
+                f"{settings.salute_api_url}/speech:recognize",
+                params={"language": language, "model": "general"},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": mime,
+                },
+                content=audio,
+            )
+            r.raise_for_status()
+            payload = r.json()
+        # Salute returns: {"status": <int>, "result": ["text1", "text2"], "request_id": "..."}
+        results = payload.get("result") or []
+        return " ".join(results).strip()
