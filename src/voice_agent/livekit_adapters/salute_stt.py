@@ -121,50 +121,56 @@ class _SaluteRecognizeStream(stt.RecognizeStream):
             stub = recognition_pb2_grpc.SmartSpeechStub(channel)
             call = stub.Recognize(_audio_request_generator(self._input_ch, self._language))
 
+            # In multi-utterance mode Salute keeps the gRPC stream alive across
+            # utterances and emits eou=True at each boundary. We track per-utterance
+            # state with new request_ids so transcripts don't collide.
+            cur_req_id = str(uuid.uuid4())
             started = False
             async for resp in call:
-                if not started:
-                    # Emit START_OF_SPEECH on first response that has any text.
-                    if any(h.text for h in resp.results):
-                        self._event_ch.send_nowait(
-                            stt.SpeechEvent(
-                                type=stt.SpeechEventType.START_OF_SPEECH,
-                                request_id=req_id,
-                            )
-                        )
-                        started = True
-
                 if not resp.results:
+                    if not resp.eou:
+                        continue
+                    # eou with no text — utterance ended silently; reset for next.
+                    started = False
+                    cur_req_id = str(uuid.uuid4())
                     continue
 
                 text = resp.results[0].normalized_text or resp.results[0].text
 
+                if not started and text:
+                    self._event_ch.send_nowait(
+                        stt.SpeechEvent(
+                            type=stt.SpeechEventType.START_OF_SPEECH,
+                            request_id=cur_req_id,
+                        )
+                    )
+                    started = True
+
                 if resp.eou:
-                    # Final result for this utterance.
+                    # Final for this utterance — emit FINAL, then reset for next one.
                     self._event_ch.send_nowait(
                         stt.SpeechEvent(
                             type=stt.SpeechEventType.FINAL_TRANSCRIPT,
-                            request_id=req_id,
+                            request_id=cur_req_id,
                             alternatives=[stt.SpeechData(language=self._language, text=text)],
                         )
                     )
+                    self._event_ch.send_nowait(
+                        stt.SpeechEvent(
+                            type=stt.SpeechEventType.END_OF_SPEECH,
+                            request_id=cur_req_id,
+                        )
+                    )
+                    started = False
+                    cur_req_id = str(uuid.uuid4())
                 else:
-                    # Partial / interim result — good for live display.
                     self._event_ch.send_nowait(
                         stt.SpeechEvent(
                             type=stt.SpeechEventType.INTERIM_TRANSCRIPT,
-                            request_id=req_id,
+                            request_id=cur_req_id,
                             alternatives=[stt.SpeechData(language=self._language, text=text)],
                         )
                     )
-
-        # Signal end-of-speech after gRPC stream closes.
-        self._event_ch.send_nowait(
-            stt.SpeechEvent(
-                type=stt.SpeechEventType.END_OF_SPEECH,
-                request_id=req_id,
-            )
-        )
 
 
 async def _audio_request_generator(
@@ -179,15 +185,16 @@ async def _audio_request_generator(
             language=language,
             model="general",
             enable_partial_results=True,
+            enable_multi_utterance=True,  # keep stream alive across multiple turns
             channels_count=1,
         )
     )
 
     async for item in input_ch:
         if isinstance(item, stt.RecognizeStream._FlushSentinel):
-            # Flush means end of this utterance — close the generator so gRPC
-            # sends half-close and Salute produces the final eou=True result.
-            return
+            # Multi-utterance: Salute detects boundaries from audio VAD itself.
+            # LiveKit's flush is just a hint — skip it and keep streaming.
+            continue
         # item is an rtc.AudioFrame; .data is a memoryview of PCM16 LE bytes.
         pcm = bytes(item.data)
         # Split into fixed-size chunks so gRPC message size stays small.
