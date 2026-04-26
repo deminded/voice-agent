@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from voice_agent.config import settings
@@ -165,6 +165,58 @@ async def icon_192() -> FileResponse:
 @app.get("/icon-512.png")
 async def icon_512() -> FileResponse:
     return FileResponse(WEB_DIR / "icon-512.png", media_type="image/png")
+
+
+@app.post("/say")
+async def say(request: Request) -> dict:
+    """Synthesise text into the active LiveKit room via the agent worker.
+
+    Sends a data message to the room; the worker picks it up and calls
+    session.say() — TTS only, no LLM involved.
+    """
+    from livekit import api as lk_api
+    from livekit.api import SendDataRequest, ListRoomsRequest
+    from livekit.protocol.models import DataPacket
+
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text required")
+
+    api_key = os.environ.get("LIVEKIT_API_KEY")
+    api_secret = os.environ.get("LIVEKIT_API_SECRET")
+    url = os.environ.get("LIVEKIT_URL")
+    if not (api_key and api_secret and url):
+        raise HTTPException(500, "LIVEKIT_* env vars missing")
+
+    async with lk_api.LiveKitAPI(url, api_key, api_secret) as lkapi:
+        resp = await lkapi.room.list_rooms(ListRoomsRequest())
+        rooms = resp.rooms
+
+        # Pick the room that already has the worker inside (>1 participant).
+        # Falls back to the first voice-agent-* room if none qualify yet.
+        target = None
+        for r in rooms:
+            if r.name.startswith("voice-agent-") and r.num_participants > 1:
+                target = r.name
+                break
+        if target is None:
+            for r in rooms:
+                if r.name.startswith("voice-agent-"):
+                    target = r.name
+                    break
+        if target is None:
+            raise HTTPException(409, "no active rooms")
+
+        payload = json.dumps({"type": "external_say", "text": text}).encode()
+        await lkapi.room.send_data(SendDataRequest(
+            room=target,
+            data=payload,
+            kind=DataPacket.Kind.RELIABLE,
+        ))
+
+    log.info("/say → room=%s text=%r", target, text)
+    return {"status": "ok", "room": target}
 
 
 @app.get("/livekit/token")

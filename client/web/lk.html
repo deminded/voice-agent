@@ -35,7 +35,25 @@
   button.mode:last-child { border-right:0; }
   button.mode:disabled { cursor:default; opacity:0.5; }
   button.mode.active { background:var(--accent); color:#000; font-weight:600; }
+  button.mode.active.cli-active { background:var(--warn); }
   .dot.muted { background:#ff6e6e; box-shadow:0 0 8px #ff6e6e; }
+  .target-group { display:inline-flex; border:1px solid #2a2d35; border-radius:8px; overflow:hidden; }
+  button.target { appearance:none; border:0; background:transparent; color:var(--muted); padding:8px 14px; font:inherit; font-size:13px; cursor:pointer; border-right:1px solid #2a2d35; }
+  button.target:last-child { border-right:0; }
+  button.target:disabled { cursor:default; opacity:0.5; }
+  button.target.active { background:var(--accent); color:#000; font-weight:600; }
+  button.target.active.cli-active { background:var(--warn); color:#000; }
+  .footer-controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; justify-content:center; }
+  @media (max-width: 600px) {
+    footer { flex-direction:column; gap:10px; padding:12px; }
+    .hint { text-align:center; font-size:11px; order:-1; }
+    .footer-controls { width:100%; flex-direction:column; gap:8px; }
+    .mode-group { display:flex; width:100%; }
+    .target-group { display:flex; width:100%; }
+    button.mode { flex:1; padding:12px 4px; }
+    button.target { flex:1; padding:12px 4px; }
+    button.action { width:100%; padding:14px 24px; }
+  }
 </style>
 </head>
 <body>
@@ -51,13 +69,19 @@
 
 <footer>
   <span id="hint" class="hint">click connect, then just talk — the agent handles turns</span>
-  <div id="modeGroup" class="mode-group" style="display:none;">
-    <button id="modeAuto" class="mode" data-mode="auto" disabled>auto</button>
-    <button id="modeOn" class="mode" data-mode="always-on" disabled>always on</button>
-    <button id="modeOff" class="mode" data-mode="always-off" disabled>always off</button>
+  <div class="footer-controls">
+    <div id="targetGroup" class="target-group" style="display:none;">
+      <button id="targetAgent" class="target" data-target="agent" disabled>Voice Agent</button>
+      <button id="targetCli" class="target" data-target="cli" disabled>CLI</button>
+    </div>
+    <div id="modeGroup" class="mode-group" style="display:none;">
+      <button id="modeAuto" class="mode" data-mode="auto" disabled>auto</button>
+      <button id="modeOn" class="mode" data-mode="always-on" disabled>always on</button>
+      <button id="modeOff" class="mode" data-mode="always-off" disabled>always off</button>
+    </div>
+    <button id="interjectBtn" class="action" disabled style="display:none;background:var(--warn);color:#000;">interject</button>
+    <button id="connectBtn" class="action">connect</button>
   </div>
-  <button id="interjectBtn" class="action" disabled style="display:none;background:var(--warn);color:#000;">interject</button>
-  <button id="connectBtn" class="action">connect</button>
 </footer>
 
 <script type="module">
@@ -73,15 +97,37 @@ const hint = document.getElementById('hint');
 const modeGroup = document.getElementById('modeGroup');
 const modeBtns = modeGroup.querySelectorAll('button.mode');
 const interjectBtn = document.getElementById('interjectBtn');
+const targetGroup = document.getElementById('targetGroup');
+const targetBtns = targetGroup.querySelectorAll('button.target');
 
 let room = null;
 let connected = false;
+let audioCtx = null;     // shared AudioContext for media-stream playback routing
 
 const Mode = { AUTO: 'auto', ALWAYS_ON: 'always-on', ALWAYS_OFF: 'always-off' };
 let mode = Mode.ALWAYS_ON;       // headphones default; switch to AUTO for room
 let userOverride = false;        // true when user manually unmuted during agent speech
 let agentSpeaking = false;
 let agentOffTimer = null;        // debounce off-transitions to ride sentence pauses
+
+// Phase C: per-session reply target. Persisted in localStorage so the
+// choice survives page refreshes within the same browser session.
+const Target = { AGENT: 'agent', CLI: 'cli' };
+let target = localStorage.getItem('voiceTarget') === Target.CLI ? Target.CLI : Target.AGENT;
+
+const HINT_AGENT = 'just speak — the agent will hear you and reply';
+const HINT_CLI   = 'отвечает CLI — главная Claude Code сессия';
+
+async function sendSetMode(t) {
+  // Publish the current target to the room so the worker updates its per-room state.
+  if (!room?.localParticipant) return;
+  try {
+    const data = new TextEncoder().encode(JSON.stringify({ type: 'set_mode', mode: t }));
+    await room.localParticipant.publishData(data, { reliable: true });
+  } catch (err) {
+    console.warn('sendSetMode failed', err);
+  }
+}
 
 // transcript bubbles, keyed by id; partial -> final replaces in place
 const bubbles = new Map();
@@ -121,7 +167,9 @@ async function connect() {
   room
     .on(RoomEvent.Connected, () => {
       setStatus('connected', 'live');
-      hint.textContent = 'just speak — the agent will hear you and reply';
+      refreshTargetUI();
+      // Tell the worker which mode this room starts in.
+      sendSetMode(target);
     })
     .on(RoomEvent.Disconnected, () => {
       setStatus('disconnected', 'err');
@@ -134,9 +182,26 @@ async function connect() {
     })
     .on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
       if (track.kind === Track.Kind.Audio) {
+        // track.attach() is needed: it drives the WebRTC decoder pipeline so MediaStreamTrack
+        // actually produces frames. Without it the AudioContext source stays silent.
+        // But the element's *output* must be killed — otherwise it plays through STREAM_VOICE_CALL
+        // (call channel, earpiece-quiet) in parallel with our STREAM_MUSIC AudioContext path,
+        // creating doubled audio. Set muted+volume=0 BEFORE attach completes, then append.
         const el = track.attach();
+        el.muted = true;
+        el.volume = 0;
         el.autoplay = true;
         document.body.appendChild(el);
+        try {
+          if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'playback' });
+          if (audioCtx.state === 'suspended') audioCtx.resume();
+          const stream = new MediaStream([track.mediaStreamTrack]);
+          audioCtx.createMediaStreamSource(stream).connect(audioCtx.destination);
+        } catch (err) {
+          console.warn('AudioContext routing failed, falling back to <audio>', err);
+          el.muted = false;
+          el.volume = 1;
+        }
         agentDot.classList.add('on');
       }
     })
@@ -160,8 +225,10 @@ async function connect() {
   connectBtn.classList.add('live');
   connectBtn.textContent = 'disconnect';
   connectBtn.disabled = false;
-  modeGroup.style.display = 'inline-flex';
+  modeGroup.style.display = '';    // defer to CSS (inline-flex desktop, flex mobile)
   modeBtns.forEach(b => b.disabled = false);
+  targetGroup.style.display = '';  // show target selector
+  targetBtns.forEach(b => b.disabled = false);
   applyMode();
 }
 
@@ -171,6 +238,8 @@ async function disconnect() {
     room = null;
   }
   modeBtns.forEach(b => b.disabled = true);
+  targetBtns.forEach(b => b.disabled = true);
+  targetGroup.style.display = 'none';
   interjectBtn.disabled = true;
   interjectBtn.style.display = 'none';
   agentSpeaking = false;
@@ -228,12 +297,32 @@ function refreshUI() {
   interjectBtn.disabled = !showInterject;
 }
 
+function refreshTargetUI() {
+  targetBtns.forEach(b => {
+    const isActive = b.dataset.target === target;
+    b.classList.toggle('active', isActive);
+    // Orange tint when CLI is selected, so it's visually distinct from mic modes
+    b.classList.toggle('cli-active', isActive && target === Target.CLI);
+  });
+  hint.textContent = target === Target.CLI ? HINT_CLI : HINT_AGENT;
+}
+
 modeBtns.forEach(btn => {
   btn.addEventListener('click', () => {
     if (btn.disabled) return;
     mode = btn.dataset.mode;
     userOverride = false;
     applyMode();
+  });
+});
+
+targetBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.disabled || !connected) return;
+    target = btn.dataset.target;
+    localStorage.setItem('voiceTarget', target);
+    refreshTargetUI();
+    sendSetMode(target);
   });
 });
 
