@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -96,12 +98,19 @@ def _check_token(request: Request) -> str | None:
     )
 
 
+def _token_eq(provided: str | None, expected: str) -> bool:
+    """Constant-time equality so attackers can't time-slice the token."""
+    if not provided:
+        return False
+    return secrets.compare_digest(provided, expected)
+
+
 @app.middleware("http")
 async def access_token_middleware(request: Request, call_next):
     if not ACCESS_TOKEN:
         return await call_next(request)
     is_public = request.url.path in ACCESS_BYPASS_PATHS
-    if not is_public and _check_token(request) != ACCESS_TOKEN:
+    if not is_public and not _token_eq(_check_token(request), ACCESS_TOKEN):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     response: Response = await call_next(request)
     # Promote query-param auth to a long-lived cookie so PWA visits stay logged in.
@@ -109,8 +118,8 @@ async def access_token_middleware(request: Request, call_next):
     # Refreshes the cookie if it holds a stale value (e.g. after token rotation),
     # not just when it's missing — otherwise old cookies block the new key forever.
     if (
-        request.query_params.get("key") == ACCESS_TOKEN
-        and request.cookies.get(ACCESS_COOKIE) != ACCESS_TOKEN
+        _token_eq(request.query_params.get("key"), ACCESS_TOKEN)
+        and not _token_eq(request.cookies.get(ACCESS_COOKIE), ACCESS_TOKEN)
     ):
         # Set Secure only when the request was actually HTTPS — in production nginx
         # terminates TLS and forwards X-Forwarded-Proto, so we honour that.
@@ -224,6 +233,10 @@ async def say(request: Request) -> dict:
     return {"status": "ok", "room": target}
 
 
+_IDENTITY_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_VALID_PROVIDERS = frozenset({"salute", "yandex"})
+
+
 @app.get("/livekit/token")
 async def livekit_token(identity: str = "guest", provider: str = "salute") -> dict:
     """Mint a short-lived JWT for the browser to join a LiveKit room.
@@ -233,9 +246,18 @@ async def livekit_token(identity: str = "guest", provider: str = "salute") -> di
 
     provider: STT/TTS provider to use for this session ("salute" | "yandex").
     Stored in participant metadata so the worker reads it at entrypoint.
-    Unknown values fall back to "salute" on the worker side.
+
+    identity is embedded verbatim in the LiveKit room name; an unbounded
+    string would let an authenticated caller spam rooms on the LiveKit
+    Cloud account. Reject anything outside [A-Za-z0-9_-]{1,64}. provider
+    is whitelisted explicitly so a typo doesn't end up in JWT metadata.
     """
     from livekit import api as lk_api
+
+    if not _IDENTITY_RE.match(identity):
+        raise HTTPException(400, "invalid identity (allowed: [A-Za-z0-9_-]{1,64})")
+    if provider not in _VALID_PROVIDERS:
+        raise HTTPException(400, f"invalid provider (allowed: {sorted(_VALID_PROVIDERS)})")
 
     api_key = os.environ.get("LIVEKIT_API_KEY")
     api_secret = os.environ.get("LIVEKIT_API_SECRET")
@@ -265,7 +287,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
             or ws.cookies.get(ACCESS_COOKIE)
             or ws.headers.get("X-Voice-Access-Token")
         )
-        if provided != ACCESS_TOKEN:
+        if not _token_eq(provided, ACCESS_TOKEN):
             await ws.close(code=4401)
             return
     await ws.accept()

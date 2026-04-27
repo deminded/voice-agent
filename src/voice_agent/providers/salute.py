@@ -10,11 +10,22 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import AsyncIterator
 
 import httpx
 
 from voice_agent.config import settings
+
+
+# Sber endpoints are signed by the Russian Trusted Root CA, which is
+# absent from certifi's bundle. Ship the cert in-tree and pin httpx
+# clients to it instead of disabling TLS verification entirely.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_RUSSIAN_TRUSTED_CA = _REPO_ROOT / "certs" / "russian_trusted_root_ca.pem"
+# Fall back to `True` (system CA bundle) if the cert was somehow not shipped —
+# better to fail closed on TLS than to silently disable verification.
+_VERIFY = str(_RUSSIAN_TRUSTED_CA) if _RUSSIAN_TRUSTED_CA.is_file() else True
 
 
 @dataclass
@@ -43,7 +54,7 @@ class SaluteAuth:
             return self._token.value
 
     async def _fetch(self) -> _Token:
-        async with httpx.AsyncClient(verify=False, timeout=10.0) as c:
+        async with httpx.AsyncClient(verify=_VERIFY, timeout=10.0) as c:
             r = await c.post(
                 settings.salute_oauth_url,
                 headers={
@@ -78,7 +89,7 @@ class SaluteTTS:
     ) -> bytes:
         token = await self._auth.get_token()
         content_type = "application/ssml" if ssml else "application/text"
-        async with httpx.AsyncClient(verify=False, timeout=30.0) as c:
+        async with httpx.AsyncClient(verify=_VERIFY, timeout=30.0) as c:
             r = await c.post(
                 f"{settings.salute_api_url}/text:synthesize",
                 params={"format": format, "voice": voice},
@@ -109,7 +120,7 @@ class SaluteTTS:
         """
         token = await self._auth.get_token()
         content_type = "application/ssml" if ssml else "application/text"
-        async with httpx.AsyncClient(verify=False, timeout=30.0) as c:
+        async with httpx.AsyncClient(verify=_VERIFY, timeout=30.0) as c:
             async with c.stream(
                 "POST",
                 f"{settings.salute_api_url}/text:synthesize",
@@ -155,7 +166,7 @@ class SaluteSTT:
     ) -> str:
         token = await self._auth.get_token()
         mime = _SALUTE_MIME[format]
-        async with httpx.AsyncClient(verify=False, timeout=60.0) as c:
+        async with httpx.AsyncClient(verify=_VERIFY, timeout=60.0) as c:
             r = await c.post(
                 f"{settings.salute_api_url}/speech:recognize",
                 params={"language": language, "model": "general"},

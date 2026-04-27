@@ -110,3 +110,54 @@ def test_token_disabled_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     with TestClient(srv.app) as client:
         r = client.get("/lk")
         assert r.status_code == 200  # no auth required
+
+
+def test_stale_cookie_refreshes_on_query_key(secret: str) -> None:
+    """After token rotation the operator hits /lk?key=<new> with an old
+    cookie still in the browser; the middleware must overwrite it instead
+    of leaving the stale cookie to block subsequent /livekit/token calls."""
+    with TestClient(srv.app) as client:
+        client.cookies.set("va_access", "stale-old-token")
+        r = client.get(f"/lk?key={secret}")
+        assert r.status_code == 200
+        assert r.cookies.get("va_access") == secret
+
+
+def test_token_compare_is_constant_time() -> None:
+    """_token_eq must use secrets.compare_digest. We don't measure timing
+    here, just confirm it tolerates None and string types without crashing
+    and rejects non-equal values without raising."""
+    assert srv._token_eq(None, "x") is False
+    assert srv._token_eq("", "x") is False
+    assert srv._token_eq("x", "x") is True
+    assert srv._token_eq("x", "y") is False
+
+
+def test_livekit_token_rejects_invalid_identity(secret: str) -> None:
+    with TestClient(srv.app) as client:
+        r = client.get(
+            f"/livekit/token?key={secret}&identity=../../etc/passwd&provider=salute"
+        )
+        assert r.status_code == 400
+        assert "identity" in r.json()["detail"].lower()
+
+
+def test_livekit_token_rejects_unknown_provider(secret: str) -> None:
+    with TestClient(srv.app) as client:
+        r = client.get(
+            f"/livekit/token?key={secret}&identity=alice&provider=acme"
+        )
+        assert r.status_code == 400
+        assert "provider" in r.json()["detail"].lower()
+
+
+def test_livekit_token_accepts_valid_inputs(secret: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Identity in [A-Za-z0-9_-]{1,64} and provider in {salute, yandex} pass.
+    LIVEKIT_* env may be missing in CI — accept both 200 and 500-ish env-error."""
+    with TestClient(srv.app) as client:
+        r = client.get(
+            f"/livekit/token?key={secret}&identity=alice_bob-1&provider=yandex"
+        )
+        # Validation passes (no 400). LiveKit env may be missing in test env,
+        # in which case the handler returns 200 with {"error": "..."}.
+        assert r.status_code == 200
