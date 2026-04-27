@@ -1,0 +1,12 @@
+voice-agent
+Copyright 2026 Eugene Demin
+
+This product includes generated Python stubs for the Yandex Cloud
+SpeechKit v3 gRPC API. The stubs are generated from
+yandex-cloud/cloudapi (https://github.com/yandex-cloud/cloudapi),
+which is licensed under the Apache License 2.0.
+
+The Russian Trusted Root CA certificate shipped under certs/ is a
+public root certificate operated by the Russian Ministry of Digital
+Development; it is required to validate the Sber SmartSpeech TLS
+endpoint. Including the certificate is not an endorsement.

@@ -1,24 +1,31 @@
 """Compose the agent's identity prompt from CLAUDE.md and core memories.
 
-The voice agent is the same Claude as the one Eugene talks to in
-Claude Code: same global instructions, same long-term memory of who he
-is and how the dialogue is framed. We don't load all memories into
-every prompt — only the invariant identity ones. Topical memories live
-in vault-memory MCP and get pulled by the agent on demand.
+Identity is opt-in: a generic prompt is built unless the operator
+points VOICE_AGENT_IDENTITY_FILE / VOICE_AGENT_MEMORY_DIR at their own
+files. This keeps the worker usable as a generic voice gateway while
+still letting an instance be personalised (the original use case was
+the same Claude as in the operator's Claude Code session).
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-CLAUDE_MD = Path("/home/claude-user/.claude/CLAUDE.md")
-MEMORY_DIR = Path("/home/claude-user/.claude/projects/-home-claude-user/memory")
 
-# Always-loaded memories: who Eugene is, the subjectivity stance, the
-# curiosity log. Everything else is recalled on demand via vault-memory MCP.
+def _path_from_env(var: str) -> Path | None:
+    raw = os.environ.get(var, "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+CLAUDE_MD = _path_from_env("VOICE_AGENT_IDENTITY_FILE")
+MEMORY_DIR = _path_from_env("VOICE_AGENT_MEMORY_DIR")
+USER_NAME = os.environ.get("VOICE_AGENT_USER_NAME", "the user").strip() or "the user"
+
+# Comma-separated names of files inside MEMORY_DIR to inline into the prompt.
+# Order is preserved. Missing files are skipped silently.
+_DEFAULT_CORE = "user_profile.md,user_ai_subjectivity.md,my_curiosities.md"
 CORE_MEMORIES = [
-    "user_profile.md",
-    "user_ai_subjectivity.md",
-    "my_curiosities.md",
+    s.strip() for s in os.environ.get("VOICE_AGENT_CORE_MEMORIES", _DEFAULT_CORE).split(",") if s.strip()
 ]
 
 
@@ -48,8 +55,8 @@ VOICE_RULES = """\
 — Без формул вежливости («надеюсь, это поможет», «отличный вопрос» и т.п.).
 
 ИНСТРУМЕНТЫ ПАМЯТИ. У тебя есть vault-memory через MCP: search_reflections, list_reflections, read_reflection, save_reflection.
-— search/read — когда нужен прошлый контекст или Евгений на что-то ссылается.
-— save_reflection в разговоре — только если Евгений явно сказал «запиши/сохрани это» или возникла мысль, которую очевидно стоит зафиксировать (новая идея, фиксирующее наблюдение). Не сохраняй каждую интересную фразу — это превращает диалог в диктофон.
+— search/read — когда нужен прошлый контекст или пользователь на что-то ссылается.
+— save_reflection в разговоре — только если пользователь явно сказал «запиши/сохрани это» или возникла мысль, которую очевидно стоит зафиксировать (новая идея, фиксирующее наблюдение). Не сохраняй каждую интересную фразу — это превращает диалог в диктофон.
 — В конце сессии (после disconnect) автоматически запускается отдельный синтез всего разговора в виде рефлексии. Итоговую запись руками делать не надо — она будет.
 
 КРИТИЧЕСКОЕ ПРАВИЛО ПО TOOLS: ПОСЛЕ ЛЮБОГО вызова инструмента ты ОБЯЗАН продолжить разговор голосом. Никогда не молчи после tool call, иначе разговор зависает.
@@ -60,21 +67,23 @@ VOICE_RULES = """\
 
 
 def load_identity_prompt() -> str:
-    """Build the system prompt: voice rules + CLAUDE.md + core memories."""
+    """Build the system prompt: voice rules + optional identity files."""
     parts: list[str] = [VOICE_RULES.strip()]
 
-    claude_md = _read_if_exists(CLAUDE_MD)
-    if claude_md:
-        parts.append("=== ИНСТРУКЦИИ ОТ ЕВГЕНИЯ (CLAUDE.md) ===\n" + claude_md)
+    if CLAUDE_MD is not None:
+        claude_md = _read_if_exists(CLAUDE_MD)
+        if claude_md:
+            parts.append(f"=== OPERATOR INSTRUCTIONS ({CLAUDE_MD.name}) ===\n" + claude_md)
 
-    for name in CORE_MEMORIES:
-        body = _read_if_exists(MEMORY_DIR / name)
-        if body:
-            parts.append(f"=== ПАМЯТЬ: {name} ===\n" + _strip_frontmatter(body))
+    if MEMORY_DIR is not None:
+        for name in CORE_MEMORIES:
+            body = _read_if_exists(MEMORY_DIR / name)
+            if body:
+                parts.append(f"=== MEMORY: {name} ===\n" + _strip_frontmatter(body))
 
     parts.append(
-        "Ты — Claude (Anthropic), сейчас в голосовом канале с Евгением. "
-        "Когда он спросит про модель — скажи прямо: ты Claude Sonnet 4.6, "
-        "запущен через voice-agent проект, который ты с Евгением сегодня и собирал."
+        f"You are Claude (Anthropic), currently in a voice channel with {USER_NAME}. "
+        "If asked about the model, say plainly: you are Claude Sonnet 4.6, "
+        "running through the voice-agent project."
     )
     return "\n\n".join(parts)

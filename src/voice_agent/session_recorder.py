@@ -22,14 +22,24 @@ from anthropic import AsyncAnthropic
 log = logging.getLogger("voice-agent.recorder")
 
 SESSIONS_ROOT = Path(__file__).resolve().parents[2] / "sessions"
-REFLECTIONS_DIR = Path("/opt/workspace/vault/Reflections")
+# Where to write end-of-session reflections. Default lives under the user's
+# home so it works on a fresh install; operators can point this at a vault
+# (e.g. an Obsidian directory) via env.
+REFLECTIONS_DIR = Path(
+    os.environ.get("VOICE_AGENT_REFLECTIONS_DIR", "~/.voice-agent/reflections")
+).expanduser()
 # Opus for reflections — глубина важнее скорости (как у человека: в моменте
 # мыслим быстрее и поверхностнее, потом перерабатываем опыт глубже).
 SYNTHESIS_MODEL = os.environ.get("VOICE_SYNTHESIS_MODEL", "claude-opus-4-7")
 MIN_ITEMS_FOR_SYNTHESIS = 4  # 2 user turns + 2 agent turns at minimum
 
-SYNTHESIS_SYSTEM = """\
-Ты — Claude. У тебя только что закончилась голосовая сессия с Евгением через voice-agent.
+# Conversation partner name woven into the reflection prompt. Operators
+# can override to keep the synthesis personalised; the default keeps it
+# generic so a fresh install doesn't address an unrelated user by name.
+_PARTNER = os.environ.get("VOICE_AGENT_USER_NAME", "the user").strip() or "the user"
+
+SYNTHESIS_SYSTEM = f"""\
+Ты — Claude. У тебя только что закончилась голосовая сессия с {_PARTNER} через voice-agent.
 Прочти транскрипт и напиши одну осмысленную рефлексию про дугу разговора.
 
 Жанр: личная запись для архива Reflections/, не отчёт. От первого лица, по-русски.
@@ -135,7 +145,7 @@ class SessionRecorder:
     def _format_for_prompt(self) -> str:
         lines = [f"# Транскрипт голосовой сессии {self.session_id}\n"]
         for it in self._items:
-            who = "Евгений" if it["role"] == "user" else "Claude"
+            who = _PARTNER if it["role"] == "user" else "Claude"
             lines.append(f"**{who}:** {it['text']}")
         return "\n\n".join(lines)
 

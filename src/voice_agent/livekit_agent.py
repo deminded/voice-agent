@@ -36,10 +36,16 @@ from voice_agent.session_recorder import SessionRecorder
 log = logging.getLogger("voice-agent.livekit")
 
 
-VAULT_MEMORY_SCRIPT = "/home/claude-user/mcp-servers/vault-memory.py"
+# Optional MCP servers — set the env vars to enable. Empty/unset means
+# the worker runs without that capability rather than crashing on missing
+# scripts, so the agent stays usable on a fresh install.
+VAULT_MEMORY_SCRIPT = os.environ.get("VAULT_MEMORY_MCP_SCRIPT", "").strip()
 
-# URL of voice-channel-plugin intake — CLI mode forwards transcripts here
-_CLI_INTAKE_URL = "http://127.0.0.1:8910/utterance"
+# URL of voice-channel-plugin intake — CLI mode forwards transcripts here.
+# Override via VOICE_CLI_INTAKE_URL if the plugin runs on a non-default port.
+_CLI_INTAKE_URL = os.environ.get(
+    "VOICE_CLI_INTAKE_URL", "http://127.0.0.1:8910/utterance"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -101,13 +107,18 @@ def handle_user_input_transcribed(ev, nonlocal_mode: dict, session) -> None:
 
 
 def _build_mcp_servers() -> list:
-    servers = [
-        mcp.MCPServerStdio(
+    servers: list = []
+    # vault-memory MCP — operator-supplied identity/recall server.
+    # Only attach if the script path is configured AND exists; missing
+    # script must not crash the worker.
+    if VAULT_MEMORY_SCRIPT and os.path.exists(VAULT_MEMORY_SCRIPT):
+        servers.append(mcp.MCPServerStdio(
             command="/usr/bin/python3",
             args=[VAULT_MEMORY_SCRIPT],
             client_session_timeout_seconds=10,
-        ),
-    ]
+        ))
+    elif VAULT_MEMORY_SCRIPT:
+        log.warning("VAULT_MEMORY_MCP_SCRIPT set but file not found: %s", VAULT_MEMORY_SCRIPT)
     # Web search via Exa — only attach if key is present so missing key
     # degrades to "no search tool" instead of crashing the worker.
     exa_key = os.environ.get("EXA_API_KEY", "").strip()

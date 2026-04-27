@@ -2,13 +2,16 @@
 Description=Voice agent FastAPI server (LiveKit token + WS client)
 After=network.target
 
+# Edit User and paths for your deployment before running deploy/install.sh.
+# Defaults assume the repo is checked out at /opt/voice-agent and runs as
+# the dedicated `voice-agent` user.
 [Service]
-User=claude-user
-WorkingDirectory=/home/claude-user/voice-agent
-ExecStart=/home/claude-user/voice-agent/.venv/bin/python -m uvicorn voice_agent.server:app --host 127.0.0.1 --port 8765
+User=voice-agent
+WorkingDirectory=/opt/voice-agent
+ExecStart=/opt/voice-agent/.venv/bin/python -m uvicorn voice_agent.server:app --host 127.0.0.1 --port 8765
 Restart=always
 RestartSec=5
-EnvironmentFile=/home/claude-user/voice-agent/.env
+EnvironmentFile=/opt/voice-agent/.env
 StandardOutput=journal
 StandardError=journal
 
