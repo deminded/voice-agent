@@ -353,13 +353,18 @@ function refreshProviderUI() {
 }
 
 providerBtns.forEach(btn => {
-  btn.addEventListener('click', () => {
-    voiceProvider = btn.dataset.provider;
+  btn.addEventListener('click', async () => {
+    const next = btn.dataset.provider;
+    if (next === voiceProvider) return;
+    voiceProvider = next;
     localStorage.setItem('voiceProvider', voiceProvider);
     refreshProviderUI();
-    // Notify user that change takes effect on next connect.
+    // AgentSession is built once per LiveKit connection and locks STT/TTS to
+    // the provider in JWT metadata, so a live switch needs a reconnect.
     if (connected) {
-      hint.textContent = `Provider set to ${voiceProvider} — reconnect to apply`;
+      hint.textContent = `switching to ${voiceProvider}…`;
+      await disconnect();
+      await connect();
     }
   });
 });
