@@ -43,6 +43,10 @@
   button.target:disabled { cursor:default; opacity:0.5; }
   button.target.active { background:var(--accent); color:#000; font-weight:600; }
   button.target.active.cli-active { background:var(--warn); color:#000; }
+  .provider-group { display:inline-flex; border:1px solid #2a2d35; border-radius:8px; overflow:hidden; }
+  button.provider { appearance:none; border:0; background:transparent; color:var(--muted); padding:8px 14px; font:inherit; font-size:13px; cursor:pointer; border-right:1px solid #2a2d35; }
+  button.provider:last-child { border-right:0; }
+  button.provider.active { background:#4ecb71; color:#000; font-weight:600; }
   .footer-controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; justify-content:center; }
   @media (max-width: 600px) {
     footer { flex-direction:column; gap:10px; padding:12px; }
@@ -50,8 +54,10 @@
     .footer-controls { width:100%; flex-direction:column; gap:8px; }
     .mode-group { display:flex; width:100%; }
     .target-group { display:flex; width:100%; }
+    .provider-group { display:flex; width:100%; }
     button.mode { flex:1; padding:12px 4px; }
     button.target { flex:1; padding:12px 4px; }
+    button.provider { flex:1; padding:12px 4px; }
     button.action { width:100%; padding:14px 24px; }
   }
 </style>
@@ -73,6 +79,13 @@
     <div id="targetGroup" class="target-group" style="display:none;">
       <button id="targetAgent" class="target" data-target="agent" disabled>Voice Agent</button>
       <button id="targetCli" class="target" data-target="cli" disabled>CLI</button>
+    </div>
+    <!-- Provider toggle: one selector for both STT and TTS together.
+         Applied at connect-time via /livekit/token?provider=... query param.
+         Change takes effect on next reconnect (participant metadata strategy). -->
+    <div id="providerGroup" class="provider-group">
+      <button id="providerSalute" class="provider active" data-provider="salute">Salute</button>
+      <button id="providerYandex" class="provider" data-provider="yandex">Yandex</button>
     </div>
     <div id="modeGroup" class="mode-group" style="display:none;">
       <button id="modeAuto" class="mode" data-mode="auto" disabled>auto</button>
@@ -99,9 +112,18 @@ const modeBtns = modeGroup.querySelectorAll('button.mode');
 const interjectBtn = document.getElementById('interjectBtn');
 const targetGroup = document.getElementById('targetGroup');
 const targetBtns = targetGroup.querySelectorAll('button.target');
+const providerGroup = document.getElementById('providerGroup');
+const providerBtns = providerGroup.querySelectorAll('button.provider');
 
 let room = null;
 let connected = false;
+
+// Provider selection: one toggle for both STT and TTS.
+// Persisted in localStorage; sent to /livekit/token at connect time.
+// Takes effect on next connection (not mid-session — see participant metadata strategy).
+const Provider = { SALUTE: 'salute', YANDEX: 'yandex' };
+let voiceProvider = localStorage.getItem('voiceProvider') === Provider.YANDEX
+  ? Provider.YANDEX : Provider.SALUTE;
 let audioCtx = null;     // shared AudioContext for media-stream playback routing
 
 const Mode = { AUTO: 'auto', ALWAYS_ON: 'always-on', ALWAYS_OFF: 'always-off' };
@@ -155,7 +177,7 @@ async function connect() {
   connectBtn.disabled = true;
   setStatus('fetching token…');
 
-  const r = await fetch(`/livekit/token?identity=guest-${Math.random().toString(36).slice(2,8)}`);
+  const r = await fetch(`/livekit/token?identity=guest-${Math.random().toString(36).slice(2,8)}&provider=${voiceProvider}`);
   const j = await r.json();
   if (j.error) { setStatus('token error: ' + j.error, 'err'); connectBtn.disabled = false; return; }
 
@@ -325,6 +347,25 @@ targetBtns.forEach(btn => {
     sendSetMode(target);
   });
 });
+
+function refreshProviderUI() {
+  providerBtns.forEach(b => b.classList.toggle('active', b.dataset.provider === voiceProvider));
+}
+
+providerBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    voiceProvider = btn.dataset.provider;
+    localStorage.setItem('voiceProvider', voiceProvider);
+    refreshProviderUI();
+    // Notify user that change takes effect on next connect.
+    if (connected) {
+      hint.textContent = `Provider set to ${voiceProvider} — reconnect to apply`;
+    }
+  });
+});
+
+// Initialise provider UI on page load.
+refreshProviderUI();
 
 interjectBtn.addEventListener('click', () => {
   if (mode !== Mode.AUTO || !agentSpeaking) return;

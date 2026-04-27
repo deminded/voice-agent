@@ -1,5 +1,8 @@
 .env
 .env.*
+!.env.example
+# upstream yandex-cloud/cloudapi clone; only needed to regenerate grpc stubs
+ya_proto/
 *.wav
 *.mp3
 *.opus

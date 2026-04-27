@@ -28,8 +28,7 @@ from livekit import agents
 from livekit.agents import Agent, AgentSession, mcp
 from livekit.plugins import anthropic, silero
 
-from voice_agent.livekit_adapters.salute_stt import SaluteSTTAdapter
-from voice_agent.livekit_adapters.salute_tts import SaluteTTSAdapter
+from voice_agent.livekit_adapters.registry import STT_PROVIDERS, TTS_PROVIDERS, build_stt, build_tts
 from voice_agent.memory_loader import load_identity_prompt
 from voice_agent.session_recorder import SessionRecorder
 
@@ -146,57 +145,71 @@ class _Assistant(Agent):
 
 async def entrypoint(ctx: agents.JobContext) -> None:
     log.info("agent connecting to room %s", ctx.room.name if ctx.room else "<none>")
-    session = AgentSession(
-        vad=silero.VAD.load(),
-        stt=SaluteSTTAdapter(language="ru-RU"),
-        llm=anthropic.LLM(model="claude-sonnet-4-6"),
-        tts=SaluteTTSAdapter(voice="Tur_24000"),
-    )
-    recorder = SessionRecorder(room_name=ctx.room.name if ctx.room else None)
-    recorder.attach(session)
-    ctx.add_shutdown_callback(lambda: recorder.finalize(reason="job_shutdown"))
 
     # Phase C: per-room mode state (mutable dict so the Agent's llm_node and
-    # the data/transcript hooks all share one reference).
-    # Default 'agent' — normal STT→LLM→TTS pipeline.
-    # Client sends {"type":"set_mode","mode":"cli"|"agent"} to switch.
+    # the data/transcript hooks all share one reference). Default 'agent'.
     nonlocal_mode: dict = {"mode": "agent"}
+    # session ref via mutable holder — _on_data is registered before
+    # AgentSession exists (we need the data hook live before connect to
+    # avoid losing the client's first set_mode), so it accesses the
+    # session through this dict at fire time.
+    session_ref: dict = {"session": None}
 
-    # Phase C: CLI transcript interception.
-    # Confirmed event name from livekit-agents 1.5.5:
-    #   livekit/agents/voice/agent_session.py line 1579 — self.emit("user_input_transcribed", ev)
-    #   Event class: UserInputTranscribedEvent with fields .transcript and .is_final
-    @session.on("user_input_transcribed")
-    def _on_user_text(ev) -> None:
-        handle_user_input_transcribed(ev, nonlocal_mode, session)
-
-    # External TTS (Phase B) + set_mode (Phase C).
-    # Attach BEFORE ctx.connect() — otherwise the client's first set_mode
-    # (sent on RoomEvent.Connected to restore localStorage target) races
-    # against this handler being registered and gets dropped, leaving the
-    # worker in default 'agent' mode until the user manually re-toggles.
     @ctx.room.on("data_received")
     def _on_data(packet) -> None:
         try:
             payload = json.loads(packet.data.decode("utf-8"))
         except Exception:
             return
-
-        # Phase C: mode switch from the /lk web client
         if handle_set_mode(payload, nonlocal_mode):
             return
-
-        # Phase B: external TTS — voice-channel-plugin speaks via session.say()
         if payload.get("type") != "external_say":
             return
         text = (payload.get("text") or "").strip()
         if not text:
             return
         log.info("external_say: %r", text)
-        asyncio.create_task(session.say(text, allow_interruptions=True))
+        sess = session_ref["session"]
+        if sess is None:
+            log.warning("external_say dropped: session not yet started")
+            return
+        # session.say() in livekit-agents 1.5.5 is sync — returns SpeechHandle,
+        # not a coroutine. Same gotcha as session.interrupt(). Don't wrap in
+        # create_task; the call itself schedules the TTS in background.
+        sess.say(text, allow_interruptions=True)
+
+    # Connect first so remote participants and their metadata are visible.
+    # The previous order read remote_participants BEFORE connect — at that
+    # moment the worker hasn't joined yet, the dict is empty, and provider
+    # always falls back to salute regardless of what the client sent.
+    await ctx.connect()
+    participant = await ctx.wait_for_participant()
+    provider = "salute"
+    try:
+        meta = json.loads(participant.metadata or "{}")
+        candidate = meta.get("provider", "salute")
+        if candidate in STT_PROVIDERS:
+            provider = candidate
+    except Exception:
+        pass
+    log.info("provider selected: %s", provider)
+
+    session = AgentSession(
+        vad=silero.VAD.load(),
+        stt=build_stt(provider),
+        llm=anthropic.LLM(model="claude-sonnet-4-6"),
+        tts=build_tts(provider),
+    )
+    session_ref["session"] = session
+    recorder = SessionRecorder(room_name=ctx.room.name if ctx.room else None)
+    recorder.attach(session)
+    ctx.add_shutdown_callback(lambda: recorder.finalize(reason="job_shutdown"))
+
+    @session.on("user_input_transcribed")
+    def _on_user_text(ev) -> None:
+        handle_user_input_transcribed(ev, nonlocal_mode, session)
 
     await session.start(room=ctx.room, agent=_Assistant(nonlocal_mode))
-    await ctx.connect()
     log.info("agent connected, session live (recording to %s)", recorder.session_dir)
 
 

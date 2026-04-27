@@ -220,11 +220,15 @@ async def say(request: Request) -> dict:
 
 
 @app.get("/livekit/token")
-async def livekit_token(identity: str = "guest") -> dict:
+async def livekit_token(identity: str = "guest", provider: str = "salute") -> dict:
     """Mint a short-lived JWT for the browser to join a LiveKit room.
 
     Each visit gets a per-identity room so multiple testers don't collide.
     The agent worker auto-dispatches into any room it sees.
+
+    provider: STT/TTS provider to use for this session ("salute" | "yandex").
+    Stored in participant metadata so the worker reads it at entrypoint.
+    Unknown values fall back to "salute" on the worker side.
     """
     from livekit import api as lk_api
 
@@ -235,10 +239,14 @@ async def livekit_token(identity: str = "guest") -> dict:
         return {"error": "LIVEKIT_* env vars missing"}
 
     room_name = f"voice-agent-{identity}"
+    # Provider is embedded in participant metadata so the worker can read it
+    # at session creation time without needing a separate data-channel message.
+    metadata = json.dumps({"provider": provider})
     token = (
         lk_api.AccessToken(api_key, api_secret)
         .with_identity(identity)
         .with_name(identity)
+        .with_metadata(metadata)
         .with_grants(lk_api.VideoGrants(room_join=True, room=room_name, can_publish=True, can_subscribe=True))
     )
     return {"url": url, "token": token.to_jwt(), "room": room_name}
