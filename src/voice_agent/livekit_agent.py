@@ -70,13 +70,23 @@ async def post_to_cli(text: str) -> None:
 
     Why httpx: it's already a dependency of voice-agent (pyproject.toml).
     Errors are logged but never raised — a failed POST must not crash the worker.
+
+    The intake authenticates via the shared VOICE_INTAKE_SECRET. The header is
+    only sent when the secret is configured — otherwise we POST without it and
+    rely on the plugin's "unauthenticated mode" warning, preserving the legacy
+    open-loopback behaviour for setups that haven't rotated to a secret yet.
     """
     utterance_id = f"lk-{int(time.time() * 1000)}"
+    headers = {}
+    secret = os.environ.get("VOICE_INTAKE_SECRET", "").strip()
+    if secret:
+        headers["X-Voice-Intake-Secret"] = secret
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.post(
                 _CLI_INTAKE_URL,
                 json={"text": text, "user": "voice", "utterance_id": utterance_id},
+                headers=headers,
             )
         log.info("post_to_cli: status=%s utterance_id=%s", r.status_code, utterance_id)
     except Exception as exc:

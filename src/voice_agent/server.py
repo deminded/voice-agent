@@ -106,7 +106,12 @@ async def access_token_middleware(request: Request, call_next):
     response: Response = await call_next(request)
     # Promote query-param auth to a long-lived cookie so PWA visits stay logged in.
     # Runs on public paths too — that's the moment the user lands via /lk?key=… .
-    if request.query_params.get("key") == ACCESS_TOKEN and ACCESS_COOKIE not in request.cookies:
+    # Refreshes the cookie if it holds a stale value (e.g. after token rotation),
+    # not just when it's missing — otherwise old cookies block the new key forever.
+    if (
+        request.query_params.get("key") == ACCESS_TOKEN
+        and request.cookies.get(ACCESS_COOKIE) != ACCESS_TOKEN
+    ):
         # Set Secure only when the request was actually HTTPS — in production nginx
         # terminates TLS and forwards X-Forwarded-Proto, so we honour that.
         is_secure = (
