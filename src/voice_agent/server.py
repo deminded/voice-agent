@@ -196,6 +196,12 @@ async def say(request: Request) -> dict:
     text = (body.get("text") or "").strip()
     if not text:
         raise HTTPException(400, "text required")
+    # Cap input size: TTS is paid per character on every provider in the
+    # pool, and an authenticated client could otherwise hand us a 10MB
+    # payload to synthesize. 4096 chars is well above any reasonable
+    # spoken reply (~30 minutes at 130 wpm) and keeps the bound human.
+    if len(text) > 4096:
+        raise HTTPException(413, f"text too long ({len(text)} > 4096)")
 
     api_key = os.environ.get("LIVEKIT_API_KEY")
     api_secret = os.environ.get("LIVEKIT_API_SECRET")

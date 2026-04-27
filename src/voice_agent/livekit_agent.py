@@ -43,8 +43,23 @@ VAULT_MEMORY_SCRIPT = os.environ.get("VAULT_MEMORY_MCP_SCRIPT", "").strip()
 
 # URL of voice-channel-plugin intake — CLI mode forwards transcripts here.
 # Override via VOICE_CLI_INTAKE_URL if the plugin runs on a non-default port.
-_CLI_INTAKE_URL = os.environ.get(
-    "VOICE_CLI_INTAKE_URL", "http://127.0.0.1:8910/utterance"
+# Must point at a loopback address: transcripts contain user utterances and
+# the worker has access to identity material; sending them off-host through
+# this env var would be silent exfiltration.
+def _validate_loopback_url(raw: str) -> str:
+    from urllib.parse import urlparse
+    parsed = urlparse(raw)
+    host = (parsed.hostname or "").lower()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError(
+            f"VOICE_CLI_INTAKE_URL must point at loopback (got host={host!r}). "
+            "Transcripts are sensitive — refusing to forward off-host."
+        )
+    return raw
+
+
+_CLI_INTAKE_URL = _validate_loopback_url(
+    os.environ.get("VOICE_CLI_INTAKE_URL", "http://127.0.0.1:8910/utterance")
 )
 
 

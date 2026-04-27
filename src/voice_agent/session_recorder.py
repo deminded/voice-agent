@@ -70,6 +70,12 @@ class SessionRecorder:
         self.session_id = f"{ts}-{room_name}" if room_name else ts
         self.session_dir = SESSIONS_ROOT / self.session_id
         self.session_dir.mkdir(parents=True, exist_ok=True)
+        # Transcripts contain the full conversation text — restrict to owner.
+        # Default umask leaves session_dir 0755 and files 0644, world-readable.
+        try:
+            os.chmod(self.session_dir, 0o700)
+        except OSError:
+            pass
         self.transcript_file = self.session_dir / "transcript.jsonl"
         self._items: list[dict] = []
         self._closed = False
@@ -92,8 +98,14 @@ class SessionRecorder:
             return
         rec = {"role": item.role, "text": text, "ts": created_at}
         self._items.append(rec)
+        first_write = not self.transcript_file.exists()
         with self.transcript_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if first_write:
+            try:
+                os.chmod(self.transcript_file, 0o600)
+            except OSError:
+                pass
 
     @staticmethod
     def _extract_text(content) -> str:
@@ -180,4 +192,8 @@ class SessionRecorder:
             "---\n\n"
         )
         path.write_text(frontmatter + content + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         log.info("synthesis saved: %s", path)
